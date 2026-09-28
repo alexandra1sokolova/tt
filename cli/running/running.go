@@ -874,7 +874,7 @@ func Kill(run InstanceCtx) error {
 		return fmt.Errorf("failed to kill the processes: %w", err)
 	}
 
-	cleanupAfterKill(&run, pid, killCleanupTimeout)
+	cleanupAfterKill(&run, pid, killCleanupTimeout, removeSockets)
 
 	fullInstanceName := GetAppInstanceName(run)
 	log.Infof("The instance %s (PID = %v) has been killed.", fullInstanceName, pid)
@@ -883,19 +883,47 @@ func Kill(run InstanceCtx) error {
 }
 
 // cleanupAfterKill cleans up after the watchdog pid that tt kill killed,
-// which cannot clean up after itself. Its pid file goes only while it still
-// names pid, once the kernel has dropped the lock, which may take up to wait;
-// the sockets go with it, or when there is no pid file at all. A watchdog
-// that came up in the meantime keeps its pid file and its sockets.
-func cleanupAfterKill(run *InstanceCtx, pid int, wait time.Duration) {
-	removed, err := pidfile.RemoveFor(run.PIDFile, pid, wait)
+// which cannot clean up after itself, with removeSockets removing its
+// sockets. Its pid file goes only while it still names pid, once the kernel
+// has dropped the lock, which may take up to wait; the sockets go just
+// before it, under that lock. With no pid file at all, the sockets go under
+// a pid file tt kill takes for the time of their removal. Either way no
+// watchdog can own the instance while its sockets are removed: one that
+// comes up in the meantime keeps its pid file and its sockets.
+func cleanupAfterKill(run *InstanceCtx, pid int, wait time.Duration,
+	removeSockets func(run *InstanceCtx),
+) {
+	cleanup := func() { removeSockets(run) }
+
+	removed, err := pidfile.RemoveFor(run.PIDFile, pid, wait, cleanup)
 	if err != nil {
 		log.Warnf("cannot remove the pid file %q: %s", run.PIDFile, err)
+
+		return
 	}
 
-	_, statErr := os.Stat(run.PIDFile)
-	if removed || errors.Is(statErr, fs.ErrNotExist) {
-		removeSockets(run)
+	_, err = os.Stat(run.PIDFile)
+	if removed || !errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+
+	owned, err := pidfile.Acquire(run.PIDFile, os.Getpid())
+
+	switch {
+	case errors.Is(err, pidfile.ErrBusy):
+		// A watchdog has come up and owns the instance.
+		return
+	case err != nil:
+		log.Warnf("cannot take the pid file %q: %s", run.PIDFile, err)
+
+		return
+	}
+
+	cleanup()
+
+	err = owned.Release()
+	if err != nil {
+		log.Warnf("cannot remove the pid file %q: %s", run.PIDFile, err)
 	}
 }
 
