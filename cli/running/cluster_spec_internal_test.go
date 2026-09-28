@@ -2,7 +2,6 @@ package running
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -40,37 +39,38 @@ func waitForEventLoop(reader io.Reader) error {
 	buf := bufio.NewReader(reader)
 	waitUntil := time.Now().Add(waitFor)
 
-	var previousLine string
+	// line collects a line that arrives in parts.
+	var line, previousLine string
 
 	for {
-		line, err := buf.ReadString('\n')
-		if err != nil {
-			if err == io.EOF { // No output yet. Wait.
-				time.Sleep(100 * time.Millisecond)
-			} else {
-				return err
-			}
-		}
+		part, err := buf.ReadString('\n')
 
-		if strings.Contains(line, msgToWait) {
-			break
-		} else if strings.Contains(line, "exiting") {
+		line += part
+
+		switch {
+		case errors.Is(err, io.EOF): // No complete line yet. Wait.
+			if time.Now().After(waitUntil) {
+				return fmt.Errorf("%w%q", errTimedOutWaitingFor, msgToWait)
+			}
+
+			time.Sleep(100 * time.Millisecond)
+
+			continue
+		case err != nil:
+			return err
+		case strings.Contains(line, msgToWait):
+			return nil
+		case strings.Contains(line, "exiting"):
 			return fmt.Errorf("%w%q", errTarantoolExited, previousLine)
 		}
 
-		previousLine = line
-
-		if time.Now().After(waitUntil) { // Timeout.
-			return fmt.Errorf("%w%q", errTimedOutWaitingFor, msgToWait)
-		}
+		previousLine, line = line, ""
 	}
-
-	return nil
 }
 
 // bufferOptions sends the output of tarantool to buf, through a logger as the
-// watchdog does.
-func bufferOptions(buf *bytes.Buffer) specOptions {
+// watchdog does. The output is copied into buf while the test reads it.
+func bufferOptions(buf *lockedBuffer) specOptions {
 	logger := ttlog.NewCustomLogger(buf, "test", 0)
 
 	return specOptions{integrity: nil, stdout: logger, stderr: logger}
@@ -89,15 +89,14 @@ func TestClusterInstance_Start(t *testing.T) {
 		_ = cancelChdir()
 	}()
 
-	outputBuf := bytes.Buffer{}
-	outputBuf.Grow(1024)
+	outputBuf := &lockedBuffer{}
 
 	spec, err := clusterSpec(tntCli.Executable, &InstanceCtx{
 		ClusterConfigPath: configPath,
 		InstName:          "instance-001",
 		AppDir:            tmpDir,
 		BinaryPort:        "localhost:3013",
-	}, bufferOptions(&outputBuf))
+	}, bufferOptions(outputBuf))
 
 	require.NoError(t, err)
 
@@ -105,7 +104,7 @@ func TestClusterInstance_Start(t *testing.T) {
 	t.Cleanup(func() {
 		clusterInstance.stop()
 	})
-	require.NoError(t, waitForEventLoop(&outputBuf))
+	require.NoError(t, waitForEventLoop(outputBuf))
 	assert.FileExists(t, filepath.Join(tmpDir, "var", "run", "instance-001", "tarantool.control"))
 	assert.FileExists(t, filepath.Join(tmpDir, "var", "run", "instance-001", "tarantool.pid"))
 	assert.FileExists(t, filepath.Join(tmpDir, "instance-001.iproto"))
@@ -130,8 +129,7 @@ func TestClusterInstance_StartChangeDefaults(t *testing.T) {
 	tmpAppDir := filepath.Join(tmpDir, "appdir")
 	require.NoError(t, os.Mkdir(tmpAppDir, 0o755))
 
-	outputBuf := bytes.Buffer{}
-	outputBuf.Grow(1024)
+	outputBuf := &lockedBuffer{}
 
 	spec, err := clusterSpec(tntCli.Executable, &InstanceCtx{
 		ClusterConfigPath: configPath,
@@ -142,7 +140,7 @@ func TestClusterInstance_StartChangeDefaults(t *testing.T) {
 		ConsoleSocket:     "run/tt.control",
 		AppDir:            tmpAppDir,
 		BinaryPort:        "localhost:3013",
-	}, bufferOptions(&outputBuf))
+	}, bufferOptions(outputBuf))
 
 	require.NoError(t, err)
 
@@ -152,7 +150,7 @@ func TestClusterInstance_StartChangeDefaults(t *testing.T) {
 	t.Cleanup(func() {
 		clusterInstance.stop()
 	})
-	require.NoError(t, waitForEventLoop(&outputBuf))
+	require.NoError(t, waitForEventLoop(outputBuf))
 	assert.FileExists(t, filepath.Join(tmpAppDir, "run", "tt.control"))
 	assert.NoFileExists(t, filepath.Join(tmpAppDir, "var", "run",
 		"instance-001", "instance-001.control"))
@@ -180,8 +178,7 @@ func TestClusterInstance_StartChangeSomeDefaults(t *testing.T) {
 	tmpAppDir := filepath.Join(tmpDir, "appdir")
 	require.NoError(t, os.Mkdir(tmpAppDir, 0o755))
 
-	outputBuf := bytes.Buffer{}
-	outputBuf.Grow(1024)
+	outputBuf := &lockedBuffer{}
 
 	spec, err := clusterSpec(tntCli.Executable, &InstanceCtx{
 		ClusterConfigPath: configPath,
@@ -193,7 +190,7 @@ func TestClusterInstance_StartChangeSomeDefaults(t *testing.T) {
 		AppDir:            tmpAppDir,
 		LogDir:            tmpAppDir,
 		BinaryPort:        "localhost:3013",
-	}, bufferOptions(&outputBuf))
+	}, bufferOptions(outputBuf))
 
 	require.NoError(t, err)
 
@@ -203,7 +200,7 @@ func TestClusterInstance_StartChangeSomeDefaults(t *testing.T) {
 	t.Cleanup(func() {
 		clusterInstance.stop()
 	})
-	require.NoError(t, waitForEventLoop(&outputBuf))
+	require.NoError(t, waitForEventLoop(outputBuf))
 
 	assert.NoFileExists(t, filepath.Join(tmpAppDir, "run", "tt.control"))
 	assert.NoFileExists(t, filepath.Join(tmpAppDir, "var", "run",
@@ -234,15 +231,14 @@ func TestClusterInstance_StopByContext(t *testing.T) {
 		_ = cancelChdir()
 	}()
 
-	outputBuf := bytes.Buffer{}
-	outputBuf.Grow(1024)
+	outputBuf := &lockedBuffer{}
 
 	spec, err := clusterSpec(tntCli.Executable, &InstanceCtx{
 		ClusterConfigPath: configPath,
 		InstName:          "instance-001",
 		AppDir:            tmpDir,
 		BinaryPort:        "localhost:3013",
-	}, bufferOptions(&outputBuf))
+	}, bufferOptions(outputBuf))
 
 	require.NoError(t, err)
 
@@ -251,7 +247,7 @@ func TestClusterInstance_StopByContext(t *testing.T) {
 	t.Cleanup(func() {
 		clusterInstance.stop()
 	})
-	require.NoError(t, waitForEventLoop(&outputBuf))
+	require.NoError(t, waitForEventLoop(outputBuf))
 	cancel()
 	require.ErrorIs(t, clusterInstance.wait(), context.Canceled)
 	assert.True(t, clusterInstance.cmd.ProcessState.Success())

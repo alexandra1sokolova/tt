@@ -33,7 +33,7 @@ func (*tamperedRepository) ValidateAll() error {
 }
 
 // lockedBuffer is a buffer written by the watchdog and the output of
-// tarantool at once.
+// tarantool at once, and read by the test meanwhile.
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -44,6 +44,15 @@ func (lb *lockedBuffer) Write(data []byte) (int, error) {
 	defer lb.mu.Unlock()
 
 	return lb.buf.Write(data)
+}
+
+// Read reads what has been written and not read yet; io.EOF means nothing
+// has, for now.
+func (lb *lockedBuffer) Read(data []byte) (int, error) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+
+	return lb.buf.Read(data)
 }
 
 func (lb *lockedBuffer) String() string {
