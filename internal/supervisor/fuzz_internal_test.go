@@ -1261,8 +1261,15 @@ func fuzzSeeds() map[string][]byte {
 
 // FuzzEngine drives the engine through scripts and checks its invariants
 // after every step.
+//
+// FUZZ_NO_SEEDS=1 starts from an empty script instead of the seeds, to
+// measure how long the fuzzer takes to find a defect on its own.
 func FuzzEngine(f *testing.F) {
 	seeds := fuzzSeeds()
+	if os.Getenv("FUZZ_NO_SEEDS") != "" {
+		seeds = map[string][]byte{"empty": encodeScript(0, 0)}
+	}
+
 	for _, name := range slices.Sorted(maps.Keys(seeds)) {
 		f.Add(seeds[name])
 	}
