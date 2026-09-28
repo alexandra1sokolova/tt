@@ -18,7 +18,6 @@ import (
 	"github.com/tarantool/tt/v3/cli/process_utils"
 	"github.com/tarantool/tt/v3/cli/tail"
 	tcmCmd "github.com/tarantool/tt/v3/cli/tcm"
-	libwatchdog "github.com/tarantool/tt/v3/lib/watchdog"
 )
 
 var (
@@ -46,6 +45,7 @@ const (
 	logFileName            = "tcm.log"
 	tcmDefaultLogLines     = 10
 	watchdogRestartDelay   = 5 * time.Second
+	watchdogStopTimeout    = 30 * time.Second
 	statusPIDColumn        = 2
 	statusExecutableColumn = 3
 	statusStateColumn      = 4
@@ -165,10 +165,23 @@ func startTcmInteractive(logLevel string) error {
 	return nil
 }
 
-func startTcmUnderWatchDog() error {
-	wd := libwatchdog.NewWatchdog(tcmPidFile, watchdogPidFile, watchdogRestartDelay)
+// tcmWatchdogOpts are the options of the watchdog of TCM: the pid files in
+// the working directory, and the periodic integrity check of the global
+// --integrity-check-period.
+func tcmWatchdogOpts(cmdCtx *cmdcontext.CmdCtx, executable string) tcmCmd.WatchdogOpts {
+	repository := cmdCtx.Integrity.Repository
 
-	return wd.Start(tcmCtx.Executable)
+	return tcmCmd.WatchdogOpts{
+		Executable:   executable,
+		PidFile:      watchdogPidFile,
+		ChildPidFile: tcmPidFile,
+		RestartDelay: watchdogRestartDelay,
+		StopTimeout:  watchdogStopTimeout,
+		CheckPeriod:  time.Duration(cmdCtx.Cli.IntegrityCheckPeriod) * time.Second,
+		Check: func(context.Context) error {
+			return repository.ValidateAll()
+		},
+	}
 }
 
 func internalStartTcm(cmdCtx *cmdcontext.CmdCtx, args []string) error {
@@ -186,7 +199,7 @@ func internalStartTcm(cmdCtx *cmdcontext.CmdCtx, args []string) error {
 		return startTcmInteractive(tcmCtx.Log.Level)
 	}
 
-	return startTcmUnderWatchDog()
+	return tcmCmd.RunWatchdog(tcmWatchdogOpts(cmdCtx, tcmCtx.Executable))
 }
 
 func internalTcmStatus(cmdCtx *cmdcontext.CmdCtx, args []string) error {

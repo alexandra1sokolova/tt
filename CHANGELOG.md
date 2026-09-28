@@ -190,6 +190,18 @@ for machine-readable output.
   `restart_on_failure` says; starting it again is up to an administrator.
   Before, an instance with `restart_on_failure: true` was restarted over the
   files that had failed the check.
+- `tt tcm start --watchdog` runs TCM under the watchdog `tt start` uses:
+  - `tt tcm stop` stops TCM with SIGTERM and kills its process group if it
+    still runs 30 seconds later. Before, the watchdog waited for TCM without
+    a limit.
+  - SIGHUP and SIGQUIT sent to the watchdog stop TCM as SIGINT and SIGTERM
+    do. Before, they killed the watchdog and left TCM running without it.
+  - The watchdog removes `watchdog.pid` and `tcm.pid` when it exits, so
+    `tt tcm status` after a stop reports the missing pid file rather than a
+    dead TCM.
+  - With `--integrity-check-period`, the integrity of the environment is
+    checked periodically while TCM runs, and a failed check stops TCM for
+    good.
 - tt logs through `log/slog`. The text log keeps its look with two changes:
   a warning is marked `⚠` instead of `•`, and a message is no longer padded
   with trailing spaces. A debug line is marked `·`, the continuation lines of
@@ -319,6 +331,9 @@ for machine-readable output.
 
 ### Fixed
 
+- A second `tt tcm start --watchdog` in a directory where one runs is refused
+  before it starts anything. Before, it started a second TCM and stopped it
+  again once it found the pid file taken.
 - `tt stop` sent while the watchdog waits to restart a failed instance stops
   the watchdog. Before, the signal was lost: the instance was restarted, and
   `tt stop` gave up after 30 seconds.
