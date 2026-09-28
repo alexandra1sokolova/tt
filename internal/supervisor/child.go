@@ -17,7 +17,10 @@ var ErrNotStarted = errors.New("the start function returned without a process")
 // StartFunc starts a fully prepared command, the way exec.Cmd.Start does:
 // on success cmd.Process is the running process, and the caller waits for it
 // with cmd.Wait. It may change how the process is started, as long as the
-// process started is a child of the caller.
+// process started is a child of the caller. It starts one process, through
+// the command it is given: a process started through another command, or
+// before the command is replaced, is not known to the engine and is neither
+// stopped nor waited for.
 type StartFunc func(cmd *exec.Cmd) error
 
 // StartCmd is the StartFunc that calls cmd.Start.
