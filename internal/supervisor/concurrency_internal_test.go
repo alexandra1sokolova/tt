@@ -147,7 +147,7 @@ func signalStorm(t *testing.T, viaRelay bool) {
 			case ActionDrop:
 				require.False(t, running, "a signal dropped while a child ran")
 				require.NoError(t, event.Err)
-			case ActionReload, ActionStop:
+			case ActionReload, ActionStop, ActionIgnore:
 			}
 
 			// A child that has exited but is not yet reaped refuses a

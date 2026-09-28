@@ -64,6 +64,8 @@
 //     restart the timeout.
 //   - The reload signal (Options.ReloadSignal) runs Options.OnReload and is
 //     then forwarded to the child.
+//   - An ignored signal (Options.IgnoreSignals) is dropped: it is reported,
+//     never forwarded and never stops anything, with a child or without.
 //   - Any other signal is forwarded to the child.
 //
 // Signals go to the child, or to its whole process group when
@@ -88,12 +90,16 @@
 // # Checks
 //
 // With Options.CheckPeriod set, Options.Check runs that often while a child is
-// running. When it returns an error, the child (its group, with
-// Spec.ProcessGroup) is killed with SIGKILL, and once the child has exited
-// Run returns the error without asking about a restart. When the child exits
-// while a check runs, the engine cancels the check's context and waits for
-// it: an error it returns still ends Run that way, unless it only reports the
-// cancellation (it matches context.Canceled).
+// running, and a Checked event reports each check once it has returned. When
+// it returns an error, the child (its group, with Spec.ProcessGroup) is
+// killed with SIGKILL, and once the child has exited Run returns the error.
+// A failed check is a hard stop: the Source is not asked about a restart,
+// and no child is started again, whatever the Source would answer.
+//
+// When the child exits while a check runs, the engine cancels the check's
+// context and waits for it. An error it returns still counts as a failed
+// check, reported by a Checked event, and ends Run the same way, unless it
+// only reports the cancellation (it matches context.Canceled).
 //
 // # Starting
 //

@@ -262,10 +262,14 @@ func (e *Engine) supervise(ctx context.Context, signals <-chan os.Signal, spec *
 	state.stopChecks = stopChecks
 
 	run := &supervision{
-		engine:    e,
-		proc:      proc,
-		spec:      spec,
-		result:    outcome{exit: Exit{Pid: 0, State: nil, Err: nil}, stopped: false, checkErr: nil},
+		engine: e,
+		proc:   proc,
+		spec:   spec,
+		result: outcome{
+			exit:     Exit{Pid: 0, State: nil, Err: nil},
+			stopped:  false,
+			checkErr: nil,
+		},
 		killTimer: nil,
 	}
 	defer run.stopKillTimer()
@@ -345,6 +349,8 @@ func (e *Engine) classify(received os.Signal) (syscall.Signal, SignalAction) {
 		return sig, ActionStop
 	case e.opts.ReloadSignal != 0 && sig == e.opts.ReloadSignal:
 		return sig, ActionReload
+	case slices.Contains(e.opts.IgnoreSignals, sig):
+		return sig, ActionIgnore
 	default:
 		return sig, ActionForward
 	}
@@ -370,6 +376,7 @@ func (run *supervision) onSignal(received os.Signal) {
 		err = errors.Join(engine.opts.OnReload(), run.proc.signal(sig))
 	case ActionForward:
 		err = run.proc.signal(sig)
+	case ActionIgnore:
 	}
 
 	engine.emit(SignalReceived{Signal: sig, Action: action, Err: err})
@@ -528,6 +535,8 @@ func (e *Engine) onIdleSignal(received os.Signal) bool {
 		e.emit(SignalReceived{Signal: sig, Action: ActionReload, Err: e.opts.OnReload()})
 	case ActionForward:
 		e.emit(SignalReceived{Signal: sig, Action: ActionDrop, Err: nil})
+	case ActionIgnore:
+		e.emit(SignalReceived{Signal: sig, Action: ActionIgnore, Err: nil})
 	}
 
 	return false

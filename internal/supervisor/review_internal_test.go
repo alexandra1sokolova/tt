@@ -41,10 +41,11 @@ func checkWhileChildExits(child *atomic.Int64, finish func(ctx context.Context) 
 }
 
 // TestCheckFailsAsChildExits pins that a check that fails while the child
-// exits is not lost: Run ends with it and the child is not restarted.
+// exits is not lost: Run ends with it and the child is not restarted, though
+// the Source would restart it.
 func TestCheckFailsAsChildExits(t *testing.T) {
 	dir := t.TempDir()
-	src := fixedSource(helperSpec(t, dir, modeServe), false)
+	src := fixedSource(helperSpec(t, dir, modeServe), true)
 
 	var child atomic.Int64
 

@@ -993,6 +993,14 @@ func TestNewRefusesOptions(t *testing.T) {
 		"check without period": {Check: check},
 		"period without check": {CheckPeriod: time.Second},
 		"negative period":      {CheckPeriod: -time.Second, Check: check},
+		"SIGKILL ignored":      {IgnoreSignals: []syscall.Signal{syscall.SIGKILL}},
+		"ignored stop": {
+			StopSignals: stopSignals, IgnoreSignals: []syscall.Signal{syscall.SIGTERM},
+		},
+		"ignored reload": {
+			ReloadSignal: syscall.SIGHUP, OnReload: reload,
+			IgnoreSignals: []syscall.Signal{syscall.SIGHUP},
+		},
 	}
 
 	for name, opts := range cases {

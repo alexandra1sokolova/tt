@@ -41,6 +41,9 @@ type Options struct {
 	ChildPidFile string
 	// StopSignals are the received signals that stop the child and end Run.
 	StopSignals []syscall.Signal
+	// IgnoreSignals are the received signals that are dropped: never
+	// forwarded, never stopping anything.
+	IgnoreSignals []syscall.Signal
 	// ReloadSignal is the received signal that runs OnReload before it is
 	// forwarded. It is set together with OnReload.
 	ReloadSignal syscall.Signal
@@ -52,7 +55,7 @@ type Options struct {
 	// together with Check.
 	CheckPeriod time.Duration
 	// Check is the periodic check. It runs on a goroutine of its own; an
-	// error kills the child and ends Run.
+	// error kills the child and ends Run, which never restarts it.
 	Check func(ctx context.Context) error
 	// Cleanup runs once when Run returns, before the supervisor pid file is
 	// removed, unless that file could not be created.
@@ -167,6 +170,15 @@ func validateOptions(source Source, opts *Options) error {
 	for _, sig := range opts.StopSignals {
 		if sig == 0 || uncatchable(sig) {
 			return fmt.Errorf("%w: %s cannot be a stop signal", ErrInvalidOptions, sig)
+		}
+	}
+
+	for _, sig := range opts.IgnoreSignals {
+		switch {
+		case sig == 0 || uncatchable(sig):
+			return fmt.Errorf("%w: %s cannot be ignored", ErrInvalidOptions, sig)
+		case slices.Contains(opts.StopSignals, sig) || sig == opts.ReloadSignal:
+			return fmt.Errorf("%w: %s is both ignored and handled", ErrInvalidOptions, sig)
 		}
 	}
 

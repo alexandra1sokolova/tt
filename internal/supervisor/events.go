@@ -38,6 +38,8 @@ const (
 	ActionForward
 	// ActionDrop dropped the signal: no child was running.
 	ActionDrop
+	// ActionIgnore dropped the signal: Options.IgnoreSignals has it.
+	ActionIgnore
 )
 
 // String names the action.
@@ -51,6 +53,8 @@ func (action SignalAction) String() string {
 		return "forward"
 	case ActionDrop:
 		return "drop"
+	case ActionIgnore:
+		return "ignore"
 	}
 
 	return "unknown"
