@@ -34,6 +34,11 @@
 // at the path starts over, so ownership never passes to an unlinked file.
 // Only the file the owner locked is removed, never one that replaced it.
 //
+// The ownership is exclusive among the processes that follow this protocol.
+// A writer or remover of the same path that does not, one that removes a
+// file it has found stale without locking it, or removes the path
+// unconditionally, can unlink the file of a new owner and break it.
+//
 // Options.PidFile is the supervisor's own pid file. Run takes it after it has
 // subscribed to signals, so whoever finds the pid of the supervisor there can
 // already stop it with a signal. If Run cannot take it, it returns before
