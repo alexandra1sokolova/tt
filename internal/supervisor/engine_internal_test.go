@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1002,13 +1003,7 @@ func TestDetach(t *testing.T) {
 
 	pid, err := Detach(exe, nil, nil)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-
-		var status syscall.WaitStatus
-
-		_, _ = syscall.Wait4(pid, &status, 0, nil)
-	})
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
 
 	waitReady(t, dir, pid)
 
@@ -1016,8 +1011,40 @@ func TestDetach(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, pid, pgid)
 
+	// Once it exits, Detach has waited for it: no zombie is left behind in a
+	// caller that lives on.
+	require.NoError(t, syscall.Kill(pid, syscall.SIGKILL))
+	assertReaped(t, pid)
+
 	_, err = Detach(exe, nil, func(*exec.Cmd) error { return errTest })
 	require.ErrorIs(t, err, errTest)
+}
+
+// TestDetachReaps pins that a detached process that exits on its own is
+// waited for.
+func TestDetachReaps(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(helperEnv, modeExit)
+	t.Setenv(dirEnv, dir)
+	t.Setenv(codeEnv, "0")
+	t.Setenv("GORACE", "atexit_sleep_ms=0")
+
+	exe, err := os.Executable()
+	require.NoError(t, err)
+
+	pid, err := Detach(exe, nil, nil)
+	require.NoError(t, err)
+	assertReaped(t, pid)
+}
+
+// assertReaped waits until pid is gone for good. A zombie still answers
+// signal 0; only a waited-for process does not.
+func assertReaped(t *testing.T, pid int) {
+	t.Helper()
+
+	assert.Eventually(t, func() bool {
+		return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+	}, waitTimeout, pollInterval, "%d was not waited for", pid)
 }
 
 // TestSubscribeOS pins that the real subscription relays signals but not

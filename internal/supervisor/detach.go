@@ -2,7 +2,6 @@ package supervisor
 
 import (
 	"context"
-	"fmt"
 	"os/exec"
 	"syscall"
 )
@@ -12,6 +11,9 @@ import (
 // stopped by signals sent to the caller's group. Its standard streams are
 // connected to the null device and it inherits the caller's environment.
 // start starts the process; nil means StartCmd. Detach returns the pid.
+//
+// While the caller lives, a goroutine waits for the process, so one that
+// exits before the caller does not stay behind as a zombie.
 func Detach(path string, args []string, start StartFunc) (int, error) {
 	if start == nil {
 		start = StartCmd
@@ -30,12 +32,10 @@ func Detach(path string, args []string, start StartFunc) (int, error) {
 		return 0, ErrNotStarted
 	}
 
-	pid := cmd.Process.Pid
+	go func() {
+		// Nobody reads the exit status of a detached process.
+		_ = cmd.Wait()
+	}()
 
-	err = cmd.Process.Release()
-	if err != nil {
-		return 0, fmt.Errorf("releasing the process %d: %w", pid, err)
-	}
-
-	return pid, nil
+	return cmd.Process.Pid, nil
 }
