@@ -104,7 +104,7 @@ func TestStopEscalatesToKill(t *testing.T) {
 func TestRepeatedStopKeepsTimeout(t *testing.T) {
 	const (
 		stopTimeout = time.Second
-		secondAfter = 800 * time.Millisecond
+		secondAfter = stopTimeout / 2
 	)
 
 	dir := t.TempDir()
@@ -112,20 +112,38 @@ func TestRepeatedStopKeepsTimeout(t *testing.T) {
 
 	spec.StopTimeout = stopTimeout
 
-	sup := newHarness(t, fixedSource(spec, true), Options{StopSignals: stopSignals})
+	var (
+		sup  *harness
+		sent atomic.Bool
+	)
+
+	rec := &recorder{}
+
+	sup = newHarness(t, fixedSource(spec, true), Options{
+		StopSignals: stopSignals,
+		OnEvent: func(event Event) {
+			rec.record(event)
+
+			// The loop sends itself the second stop while it handles the
+			// first, so the second is always handled well before the kill
+			// timer can fire, however the scheduler treats the test.
+			received, ok := event.(SignalReceived)
+			if ok && received.Action == ActionStop && !sent.Swap(true) {
+				time.Sleep(secondAfter)
+				sup.send(syscall.SIGINT)
+			}
+		},
+	})
+
+	sup.rec = rec
 	sup.start()
 
-	started := waitEvent[Started](t, sup.rec, 1)
+	started := waitEvent[Started](t, rec, 1)
 	waitReady(t, dir, started.Pid)
 	sup.send(syscall.SIGTERM)
-	time.Sleep(secondAfter)
-
-	secondAt := time.Now()
-
-	sup.send(syscall.SIGINT)
 	require.NoError(t, sup.wait())
 
-	stops, _ := eventsOf[SignalReceived](sup.rec)
+	stops, stopTimes := eventsOf[SignalReceived](rec)
 	require.Len(t, stops, 2)
 
 	for _, stop := range stops {
@@ -133,11 +151,15 @@ func TestRepeatedStopKeepsTimeout(t *testing.T) {
 		require.NoError(t, stop.Err)
 	}
 
-	kills, killTimes := eventsOf[Killed](sup.rec)
+	kills, killTimes := eventsOf[Killed](rec)
 	require.Len(t, kills, 1)
-	// Re-armed, the kill would come a whole stop timeout after the second
-	// signal; kept, it comes 200ms after it.
-	assert.Less(t, killTimes[0].Sub(secondAt), stopTimeout-300*time.Millisecond)
+	require.True(t, stopTimes[1].Before(killTimes[0]))
+
+	// Kept, the kill comes a stop timeout after the first stop; re-armed, it
+	// would come half a timeout later.
+	sinceFirst := killTimes[0].Sub(stopTimes[0])
+	assert.GreaterOrEqual(t, sinceFirst, stopTimeout-secondAfter/10)
+	assert.Less(t, sinceFirst, stopTimeout+secondAfter/2)
 }
 
 // TestRestartAsDecided pins that the Source decides every restart, is given

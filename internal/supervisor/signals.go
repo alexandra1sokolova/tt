@@ -18,10 +18,20 @@ const signalBuffer = 128
 // event loop reads from while it is busy starting a child.
 func subscribeOS() (<-chan os.Signal, func()) {
 	raw := make(chan os.Signal, signalBuffer)
-	relayed := make(chan os.Signal, signalBuffer)
-	done := make(chan struct{})
 
 	signal.Notify(raw)
+
+	// No signal reaches raw once Stop returns, so closing it is safe.
+	return relay(raw, func() { signal.Stop(raw) })
+}
+
+// relay passes the signals from raw on to the returned channel, all but
+// SIGURG and SIGCHLD, dropping those that find it full, until the returned
+// function is called. That function calls detach, which has to stop the
+// delivery into raw, closes raw and waits for the relay to finish.
+func relay(raw chan os.Signal, detach func()) (<-chan os.Signal, func()) {
+	relayed := make(chan os.Signal, signalBuffer)
+	done := make(chan struct{})
 
 	go func() {
 		defer close(done)
@@ -39,8 +49,7 @@ func subscribeOS() (<-chan os.Signal, func()) {
 	}()
 
 	return relayed, func() {
-		// No signal reaches raw once Stop returns, so closing it is safe.
-		signal.Stop(raw)
+		detach()
 		close(raw)
 		<-done
 	}

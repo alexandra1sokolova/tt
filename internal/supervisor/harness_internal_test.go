@@ -214,10 +214,28 @@ func (h *harness) start() {
 			}
 		})
 
-		for _, pid := range h.pids() {
+		// Only children never reported exited: a reaped pid may already
+		// belong to an unrelated process.
+		for _, pid := range h.unreaped() {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	})
+}
+
+// unreaped are the pids of the children started and not reported exited.
+func (h *harness) unreaped() []int {
+	var pids []int
+
+	for _, item := range h.rec.all() {
+		switch event := item.event.(type) {
+		case Started:
+			pids = append(pids, event.Pid)
+		case Exit:
+			pids = slices.DeleteFunc(pids, func(pid int) bool { return pid == event.Pid })
+		}
+	}
+
+	return pids
 }
 
 // wait returns the result of Run, failing the test if it takes too long.

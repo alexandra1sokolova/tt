@@ -17,11 +17,24 @@ import (
 
 // TestSignalStormAcrossRestarts sends a burst of signals from several
 // goroutines at a child that keeps exiting and being restarted. It pins that
-// every signal is handled exactly once and in its right place: forwarded
-// only while a child runs, and then only to that child; dropped only while
-// none runs; the reload hook run for each reload signal; and the stop, sent
-// last, still ends Run.
+// every signal the engine receives is handled exactly once and in its right
+// place: forwarded only while a child runs, and then only to that child;
+// dropped only while none runs; the reload hook run for each reload signal;
+// and the stop, sent last, still ends Run.
+//
+// Injected, every signal sent reaches the engine, so the counts are exact.
+// Through the relay the engine runs on, a signal is sent the way the Go
+// runtime delivers one, dropped when the relay's input is full, with the
+// runtime's own SIGURG and SIGCHLD mixed in; then the counts can only be
+// bounded by what was accepted.
 func TestSignalStormAcrossRestarts(t *testing.T) {
+	t.Run("injected", func(t *testing.T) { signalStorm(t, false) })
+	t.Run("relay", func(t *testing.T) { signalStorm(t, true) })
+}
+
+func signalStorm(t *testing.T, viaRelay bool) {
+	t.Helper()
+
 	const (
 		senders   = 8
 		perSender = 200
@@ -31,7 +44,7 @@ func TestSignalStormAcrossRestarts(t *testing.T) {
 	dir := t.TempDir()
 	src := fixedSource(helperSpec(t, dir, modeExit, codeEnv+"=1"), true)
 
-	var reloads atomic.Int32
+	var reloads, accepted atomic.Int32
 
 	sup := newHarness(t, src, Options{
 		StopSignals:  stopSignals,
@@ -43,6 +56,28 @@ func TestSignalStormAcrossRestarts(t *testing.T) {
 			return nil
 		},
 	})
+
+	send := func(sig syscall.Signal) {
+		sup.send(sig)
+		accepted.Add(1)
+	}
+
+	if viaRelay {
+		raw := make(chan os.Signal, signalBuffer)
+
+		sup.engine.subscribe = func() (<-chan os.Signal, func()) { return relay(raw, func() {}) }
+		// Like the runtime: never block, drop what does not fit.
+		send = func(sig syscall.Signal) {
+			select {
+			case raw <- sig:
+				if sig != syscall.SIGURG && sig != syscall.SIGCHLD {
+					accepted.Add(1)
+				}
+			default:
+			}
+		}
+	}
+
 	sup.start()
 	waitEvent[Started](t, sup.rec, 1)
 
@@ -56,14 +91,34 @@ func TestSignalStormAcrossRestarts(t *testing.T) {
 					sig = syscall.SIGHUP
 				}
 
-				sup.send(sig)
+				send(sig)
+
+				if viaRelay {
+					send(syscall.SIGURG)
+					send(syscall.SIGCHLD)
+				}
+
 				time.Sleep(time.Millisecond)
 			}
 		})
 	}
 
 	burst.Wait()
-	sup.send(syscall.SIGTERM)
+
+	// A stop sent through the relay can be dropped as well: resend it
+	// until Run returns, as a user would.
+	for stopped := false; !stopped; {
+		send(syscall.SIGTERM)
+
+		select {
+		case err := <-sup.done:
+			sup.done <- err
+
+			stopped = true
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
 	require.NoError(t, sup.wait())
 
 	var (
@@ -83,6 +138,9 @@ func TestSignalStormAcrossRestarts(t *testing.T) {
 		case SignalReceived:
 			actions[event.Action]++
 
+			require.NotContains(t, []syscall.Signal{syscall.SIGURG, syscall.SIGCHLD},
+				event.Signal, "the relay passed a runtime signal on")
+
 			switch event.Action {
 			case ActionForward:
 				require.True(t, running, "a signal forwarded while no child ran")
@@ -101,13 +159,24 @@ func TestSignalStormAcrossRestarts(t *testing.T) {
 	}
 
 	forwards, drops := actions[ActionForward], actions[ActionDrop]
-	assert.Equal(t, senders*perSender, forwards+drops+actions[ActionReload])
-	assert.Equal(t, 1, actions[ActionStop])
-	assert.Equal(t, int32(senders*perSender/reloadsIn), reloads.Load())
+	handled := forwards + drops + actions[ActionReload] + actions[ActionStop]
+	assert.Equal(t, actions[ActionReload], int(reloads.Load()))
+
+	if viaRelay {
+		// The relay drops only when its own buffer is full; it never
+		// invents a signal.
+		assert.LessOrEqual(t, handled, int(accepted.Load()))
+		assert.GreaterOrEqual(t, actions[ActionStop], 1)
+	} else {
+		assert.Equal(t, int(accepted.Load()), handled)
+		assert.Equal(t, 1, actions[ActionStop])
+		assert.Equal(t, int32(senders*perSender/reloadsIn), reloads.Load())
+	}
 
 	nexts, restarts := src.calls()
 	assert.Contains(t, []int{0, 1}, nexts-restarts)
-	t.Logf("%d starts, %d signals forwarded, %d dropped", nexts, forwards, drops)
+	t.Logf("%d starts, %d accepted, %d handled: %d forwarded, %d dropped",
+		nexts, accepted.Load(), handled, forwards, drops)
 	// The burst has to span both states for the test to test anything.
 	assert.Positive(t, forwards)
 	assert.Positive(t, drops)

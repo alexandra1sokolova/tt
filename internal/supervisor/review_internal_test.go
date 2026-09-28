@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -233,6 +237,76 @@ func TestQueuedStopBeatsRestart(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGrandchildHoldsOutput pins that an exited child is reported once its
+// output has been drained for at most the stop timeout, even while a
+// grandchild keeps the output pipe open.
+func TestGrandchildHoldsOutput(t *testing.T) {
+	const stopTimeout = 300 * time.Millisecond
+
+	dir := t.TempDir()
+	spec := helperSpec(t, dir, modeOrphan)
+
+	spec.Stdout = io.Discard
+	spec.StopTimeout = stopTimeout
+
+	sup := newHarness(t, fixedSource(spec, false), Options{StopSignals: stopSignals})
+	sup.start()
+
+	grandchild, err := strconv.Atoi(waitFile(t, filepath.Join(dir, "grandchild")))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = syscall.Kill(grandchild, syscall.SIGKILL) })
+
+	started := waitEvent[Started](t, sup.rec, 1)
+
+	select {
+	case err := <-sup.done:
+		sup.done <- err
+	case <-time.After(10 * stopTimeout):
+		require.FailNow(t, "Run hangs on the output a grandchild holds")
+	}
+
+	require.NoError(t, sup.wait())
+
+	exit := waitEvent[Exit](t, sup.rec, 1)
+	assert.Equal(t, started.Pid, exit.Pid)
+	assert.True(t, exit.State.Success())
+	require.ErrorIs(t, exit.Err, exec.ErrWaitDelay)
+	assert.NoError(t, syscall.Kill(grandchild, 0), "the grandchild is not ours to kill")
+}
+
+// TestChildPidFileRemovalFails pins that a child pid file that cannot be
+// removed ends Run with OpChildPidFile instead of passing unnoticed.
+func TestChildPidFileRemovalFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes files from a read-only directory")
+	}
+
+	dir := t.TempDir()
+	runDir := filepath.Join(dir, "run")
+	childPidFile := filepath.Join(runDir, "child.pid")
+
+	sup := newHarness(t, fixedSource(helperSpec(t, dir, modeServe), true), Options{
+		PidFile:      filepath.Join(dir, "supervisor.pid"),
+		ChildPidFile: childPidFile,
+		StopSignals:  stopSignals,
+	})
+	sup.start()
+
+	started := waitEvent[Started](t, sup.rec, 1)
+	waitReady(t, dir, started.Pid)
+
+	require.NoError(t, os.Chmod(runDir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(runDir, 0o700) })
+
+	sup.send(syscall.SIGTERM)
+
+	err := sup.wait()
+	require.Error(t, err)
+	assert.Equal(t, OpChildPidFile, errorOp(t, err))
+	require.ErrorIs(t, err, fs.ErrPermission)
+	assert.FileExists(t, childPidFile)
 }
 
 // waitReaped waits until pid has been waited for.

@@ -41,6 +41,9 @@ const (
 	modeFamily = "family"
 	// modeSupervise runs an Engine over a serve child with real signals.
 	modeSupervise = "supervise"
+	// modeOrphan starts a stubborn grandchild that inherits its standard
+	// output, writes its pid into the grandchild file and exits at once.
+	modeOrphan = "orphan"
 )
 
 // Exit codes of modeServe per stop signal.
@@ -78,6 +81,10 @@ func runHelper(mode string) int {
 		return family(dir)
 	case modeSupervise:
 		return supervise(dir)
+	case modeOrphan:
+		orphan(dir)
+
+		return 0
 	}
 
 	fmt.Fprintf(os.Stderr, "unknown helper mode %q\n", mode)
@@ -85,8 +92,17 @@ func runHelper(mode string) int {
 	return 2
 }
 
+// mustWrite writes a file whole: a reader sees it either absent or complete,
+// never created and still empty.
 func mustWrite(path, content string) {
-	err := os.WriteFile(path, []byte(content), 0o600)
+	temp := path + ".tmp"
+
+	err := os.WriteFile(temp, []byte(content), 0o600)
+	if err != nil {
+		panic(err)
+	}
+
+	err = os.Rename(temp, path)
 	if err != nil {
 		panic(err)
 	}
@@ -166,6 +182,19 @@ func exitAtOnce(dir string) int {
 // family starts a stubborn grandchild, which stays in the family's process
 // group, and writes its pid into the grandchild file.
 func family(dir string) int {
+	startGrandchild(dir)
+
+	return serve(dir, true)
+}
+
+// orphan leaves a stubborn grandchild holding its standard output behind.
+func orphan(dir string) {
+	startGrandchild(dir)
+}
+
+// startGrandchild starts a stubborn helper that shares the standard output,
+// and writes its pid into the grandchild file.
+func startGrandchild(dir string) {
 	exe, err := os.Executable()
 	if err != nil {
 		panic(err)
@@ -174,6 +203,7 @@ func family(dir string) int {
 	grandchild := exec.CommandContext(context.Background(), exe)
 
 	grandchild.Env = append(os.Environ(), helperEnv+"="+modeStubborn)
+	grandchild.Stdout = os.Stdout
 
 	err = grandchild.Start()
 	if err != nil {
@@ -181,8 +211,6 @@ func family(dir string) int {
 	}
 
 	mustWrite(filepath.Join(dir, "grandchild"), strconv.Itoa(grandchild.Process.Pid))
-
-	return serve(dir, true)
 }
 
 // superviseSource starts one serve child and never restarts it.
