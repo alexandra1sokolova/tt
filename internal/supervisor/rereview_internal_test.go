@@ -152,6 +152,59 @@ func TestStartFuncStartsAndFails(t *testing.T) {
 	}
 }
 
+// TestCheckPanics pins that a check that panics fails: the child, which
+// ignores the stop signals, is killed, Run ends with OpCheck, and the
+// Source, which would restart, is not asked. With the cancellation that
+// comes as the child exits, a panic is a failure as well.
+func TestCheckPanics(t *testing.T) {
+	for _, late := range []bool{false, true} {
+		t.Run("late="+strconv.FormatBool(late), func(t *testing.T) {
+			dir := t.TempDir()
+			src := fixedSource(helperSpec(t, dir, modeStubborn), true)
+
+			var child atomic.Int64
+
+			check := func(context.Context) error { panic(errPanic) }
+			if late {
+				check = checkWhileChildExits(&child, func(context.Context) error {
+					panic(errPanic)
+				})
+			}
+
+			rec := &recorder{}
+			sup := newHarness(t, src, Options{
+				StopSignals: stopSignals,
+				CheckPeriod: 20 * time.Millisecond,
+				Check:       check,
+				OnEvent: func(event Event) {
+					started, ok := event.(Started)
+					if ok {
+						child.Store(int64(started.Pid))
+					}
+
+					rec.record(event)
+				},
+			})
+
+			sup.rec = rec
+			sup.start()
+
+			err := sup.wait()
+			require.ErrorIs(t, err, ErrCheckPanicked)
+			assert.Equal(t, OpCheck, errorOp(t, err))
+			assert.Contains(t, err.Error(), errPanic.Error())
+
+			_, restarts := src.calls()
+			assert.Zero(t, restarts, "the Source was asked about a restart")
+
+			checked, _ := eventsOf[Checked](rec)
+			require.Len(t, checked, 1)
+			require.ErrorIs(t, checked[0].Err, ErrCheckPanicked)
+			sup.assertNoChildren()
+		})
+	}
+}
+
 // emptyJoinError is an error joining nothing.
 type emptyJoinError struct{}
 

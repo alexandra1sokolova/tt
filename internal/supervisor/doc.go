@@ -94,7 +94,10 @@
 // it returns an error, the child (its group, with Spec.ProcessGroup) is
 // killed with SIGKILL, and once the child has exited Run returns the error.
 // A failed check is a hard stop: the Source is not asked about a restart,
-// and no child is started again, whatever the Source would answer.
+// and no child is started again, whatever the Source would answer. A check
+// that panics has failed: the panic, which happens on the checker's
+// goroutine where nothing around Run could recover it, becomes an error
+// wrapping ErrCheckPanicked.
 //
 // When the child exits while a check runs, the engine cancels the check's
 // context and waits for it. An error it returns still counts as a failed

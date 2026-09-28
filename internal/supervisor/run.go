@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"sync"
@@ -440,7 +441,7 @@ func (e *Engine) startChecks(ctx context.Context) (<-chan error, func() error) {
 			case <-ticks:
 			}
 
-			err := e.opts.Check(checkCtx)
+			err := e.check(checkCtx)
 			if checkCtx.Err() != nil {
 				// The child exited while the check ran. What the check found
 				// still counts; its giving up on the cancellation does not.
@@ -471,6 +472,26 @@ func (e *Engine) startChecks(ctx context.Context) (<-chan error, func() error) {
 
 		return late
 	}
+}
+
+// check runs Options.Check. A panic in it, which nothing around Run could
+// recover, as it happens on the checker's goroutine, fails the check: a check
+// that could not tell is not a check that passed.
+func (e *Engine) check(ctx context.Context) error {
+	var err error
+
+	func() {
+		defer func() {
+			recovered := recover()
+			if recovered != nil {
+				err = fmt.Errorf("%w: %v", ErrCheckPanicked, recovered)
+			}
+		}()
+
+		err = e.opts.Check(ctx)
+	}()
+
+	return err
 }
 
 // onlyCancelled reports whether err says nothing but that the check was

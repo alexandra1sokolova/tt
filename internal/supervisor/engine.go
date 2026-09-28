@@ -17,6 +17,9 @@ var (
 	ErrInvalidOptions = errors.New("invalid supervisor options")
 	// ErrAlreadyRun is returned by a second call to Engine.Run.
 	ErrAlreadyRun = errors.New("the supervisor has already run")
+	// ErrCheckPanicked is wrapped by the error of a check that panicked; it
+	// counts as a failed check.
+	ErrCheckPanicked = errors.New("the check panicked")
 	// errUnknownSignal is reported for a signal that is not a syscall.Signal.
 	errUnknownSignal = errors.New("not a system signal")
 )
@@ -55,7 +58,8 @@ type Options struct {
 	// together with Check.
 	CheckPeriod time.Duration
 	// Check is the periodic check. It runs on a goroutine of its own; an
-	// error kills the child and ends Run, which never restarts it.
+	// error or a panic kills the child and ends Run, which never restarts
+	// it.
 	Check func(ctx context.Context) error
 	// Cleanup runs once when Run returns, before the supervisor pid file is
 	// removed, unless that file could not be created.
