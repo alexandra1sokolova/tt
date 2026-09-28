@@ -81,12 +81,23 @@ func (wl *watchdogLog) onEnd(err error) {
 // change of the configuration applies from the next start on.
 type instanceSource struct {
 	cmdCtx *cmdcontext.CmdCtx
-	// inst is the context of the instance as the configuration read last
-	// describes it.
-	inst InstanceCtx
+	// ran is the context tarantool started last runs, or ran, with: the one
+	// whose sockets are on disk. Before the first start it is the context
+	// the watchdog was started for.
+	ran InstanceCtx
+	// next is the context the last Spec was built from. It becomes ran once
+	// tarantool has started with it.
+	next InstanceCtx
 	log  *watchdogLog
 	// refresh reads the context of the instance from the configuration.
 	refresh func() (InstanceCtx, error)
+}
+
+// newInstanceSource returns the Source of the watchdog of inst.
+func newInstanceSource(cmdCtx *cmdcontext.CmdCtx, inst *InstanceCtx, log *watchdogLog,
+	refresh func() (InstanceCtx, error),
+) *instanceSource {
+	return &instanceSource{cmdCtx: cmdCtx, ran: *inst, next: *inst, log: log, refresh: refresh}
 }
 
 // Next reads the configuration and builds the Spec of the instance from it.
@@ -96,23 +107,26 @@ func (src *instanceSource) Next(context.Context) (supervisor.Spec, error) {
 		return supervisor.Spec{}, err
 	}
 
-	src.inst = inst
+	src.next = inst
 
 	if inst.ClusterConfigPath != "" {
 		src.log.logger.Printf("(INFO): using %q cluster config for instance %q",
 			inst.ClusterConfigPath, inst.InstName)
 	}
 
-	return instanceSpec(src.cmdCtx, &src.inst, specOptions{
+	return instanceSpec(src.cmdCtx, &src.next, specOptions{
 		integrity: integrityOf(src.cmdCtx),
 		stdout:    src.log.logger,
 		stderr:    src.log.logger,
 	})
 }
 
-// Restart restarts the instance as its restart_on_failure setting says, as it
-// reads now, and switches to a new log if the log settings have changed.
+// Restart removes the sockets tarantool left as it exited, then restarts the
+// instance as its restart_on_failure setting says, as it reads now, and
+// switches to a new log if the log settings have changed.
 func (src *instanceSource) Restart(context.Context, supervisor.Exit) (bool, error) {
+	removeSockets(&src.ran)
+
 	inst, err := src.refresh()
 	if err != nil {
 		src.log.logger.Println("(ERROR): can't check if the instance is restartable.")
@@ -121,13 +135,11 @@ func (src *instanceSource) Restart(context.Context, supervisor.Exit) (bool, erro
 		return false, nil //nolint:nilerr // Logged above.
 	}
 
-	src.inst = inst
-
 	if !inst.Restartable {
 		return false, nil
 	}
 
-	logger, err := updateLogger(src.log.logger, &src.inst)
+	logger, err := updateLogger(src.log.logger, &inst)
 	if err != nil {
 		src.log.logger.Println("(ERROR): can't update logger parameters.")
 
@@ -137,6 +149,11 @@ func (src *instanceSource) Restart(context.Context, supervisor.Exit) (bool, erro
 	src.log.logger = logger
 
 	return true, nil
+}
+
+// started records that tarantool runs with the context of the last Spec.
+func (src *instanceSource) started() {
+	src.ran = src.next
 }
 
 // refreshFromConfig reads the context of the instance inst from the
@@ -207,10 +224,12 @@ func updateLogger(logger ttlog.Logger, instanceCtx *InstanceCtx) (ttlog.Logger, 
 // watchdogOptions are the options of the watchdog of an instance: the pid file
 // names the watchdog, the stop signals reach tarantool as they were sent, a
 // SIGHUP rotates the log of the watchdog and reaches tarantool as well, and
-// the periodic integrity check, when there is one, is a hard stop.
+// the periodic integrity check, when there is one, is a hard stop. The
+// sockets removed at the end are those of the context tarantool last ran
+// with, whatever the configuration says by then.
 func watchdogOptions(cmdCtx *cmdcontext.CmdCtx, src *instanceSource) supervisor.Options {
 	opts := supervisor.Options{
-		PidFile:       src.inst.PIDFile,
+		PidFile:       src.ran.PIDFile,
 		ChildPidFile:  "",
 		StopSignals:   []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT},
 		IgnoreSignals: nil,
@@ -222,10 +241,17 @@ func watchdogOptions(cmdCtx *cmdcontext.CmdCtx, src *instanceSource) supervisor.
 		CheckPeriod:  0,
 		Check:        nil,
 		Cleanup: func() {
-			removeSockets(&src.inst)
+			removeSockets(&src.ran)
 		},
-		OnEvent: src.log.onEvent,
-		Start:   nil,
+		OnEvent: func(event supervisor.Event) {
+			_, started := event.(supervisor.Started)
+			if started {
+				src.started()
+			}
+
+			src.log.onEvent(event)
+		},
+		Start: nil,
 	}
 
 	if src.log.checkPeriod != 0 {

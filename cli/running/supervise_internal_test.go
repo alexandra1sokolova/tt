@@ -74,13 +74,15 @@ type watchdogTest struct {
 	engine  *supervisor.Engine
 	mu      sync.Mutex
 	started []int
+	exits   []supervisor.Exit
 	// restartable is what the configuration says, read at every exit.
 	restartable bool
 }
 
-func newWatchdogTest(t *testing.T, restartable bool, cmdCtx *cmdcontext.CmdCtx,
-	restartDelay time.Duration,
-) *watchdogTest {
+// testRestartDelay is the restart delay of the watchdog of a test.
+const testRestartDelay = 100 * time.Millisecond
+
+func newWatchdogTest(t *testing.T, restartable bool, cmdCtx *cmdcontext.CmdCtx) *watchdogTest {
 	t.Helper()
 
 	appPath, err := filepath.Abs(filepath.Join(instTestAppDir, "dumb_test_app.lua"))
@@ -91,7 +93,10 @@ func newWatchdogTest(t *testing.T, restartable bool, cmdCtx *cmdcontext.CmdCtx,
 
 	cmdCtx.Cli.TarantoolCli.Executable = tarantool
 
+	// The sockets go in a directory of their own, short enough for a unix
+	// socket path.
 	dir := t.TempDir()
+	runDir := shortTempDir(t)
 	test := &watchdogTest{
 		t:      t,
 		cmdCtx: cmdCtx,
@@ -102,6 +107,8 @@ func newWatchdogTest(t *testing.T, restartable bool, cmdCtx *cmdcontext.CmdCtx,
 			VinylDir:       dir,
 			MemtxDir:       dir,
 			PIDFile:        filepath.Join(dir, "tt.pid"),
+			ConsoleSocket:  filepath.Join(runDir, "tarantool.control"),
+			BinaryPort:     filepath.Join(runDir, "tarantool.sock"),
 			Restartable:    restartable,
 		},
 		flag:        filepath.Join(dir, "started"),
@@ -111,41 +118,36 @@ func newWatchdogTest(t *testing.T, restartable bool, cmdCtx *cmdcontext.CmdCtx,
 
 	t.Setenv("started_flag_file", test.flag)
 
-	src := &instanceSource{
-		cmdCtx: cmdCtx,
-		inst:   test.inst,
-		log: &watchdogLog{
-			logger:      ttlog.NewCustomLogger(test.log, "Watchdog ", 0),
-			checkPeriod: time.Duration(cmdCtx.Cli.IntegrityCheckPeriod) * time.Second,
-		},
-		refresh: func() (InstanceCtx, error) {
-			test.mu.Lock()
-			defer test.mu.Unlock()
+	test.src = newInstanceSource(cmdCtx, &test.inst, &watchdogLog{
+		logger:      ttlog.NewCustomLogger(test.log, "Watchdog ", 0),
+		checkPeriod: time.Duration(cmdCtx.Cli.IntegrityCheckPeriod) * time.Second,
+	}, func() (InstanceCtx, error) {
+		test.mu.Lock()
+		defer test.mu.Unlock()
 
-			inst := test.inst
+		inst := test.inst
 
-			inst.Restartable = test.restartable
+		inst.Restartable = test.restartable
 
-			return inst, nil
-		},
-	}
+		return inst, nil
+	})
 
-	test.src = src
-
-	opts := watchdogOptions(cmdCtx, src)
+	opts := watchdogOptions(cmdCtx, test.src)
 	onEvent := opts.OnEvent
 
-	opts.RestartDelay = restartDelay
+	opts.RestartDelay = testRestartDelay
 	opts.OnEvent = func(event supervisor.Event) {
-		started, ok := event.(supervisor.Started)
-		if ok {
-			test.recordStart(started.Pid)
+		switch event := event.(type) {
+		case supervisor.Started:
+			test.recordStart(event.Pid)
+		case supervisor.Exit:
+			test.recordExit(event)
 		}
 
 		onEvent(event)
 	}
 
-	test.engine, err = supervisor.New(src, opts)
+	test.engine, err = supervisor.New(test.src, opts)
 	require.NoError(t, err)
 
 	return test
@@ -177,6 +179,20 @@ func (test *watchdogTest) recordStart(pid int) {
 	defer test.mu.Unlock()
 
 	test.started = append(test.started, pid)
+}
+
+func (test *watchdogTest) recordExit(exit supervisor.Exit) {
+	test.mu.Lock()
+	defer test.mu.Unlock()
+
+	test.exits = append(test.exits, exit)
+}
+
+func (test *watchdogTest) exitsSoFar() []supervisor.Exit {
+	test.mu.Lock()
+	defer test.mu.Unlock()
+
+	return append([]supervisor.Exit(nil), test.exits...)
 }
 
 func (test *watchdogTest) children() []int {
@@ -219,7 +235,7 @@ func waitDone(t *testing.T, done <-chan error) error {
 // tarantool that dies, by SIGINT or SIGKILL, starts again, and a SIGINT to
 // the watchdog stops it and the watchdog, which then removes its pid file.
 func TestWatchdogRestartsAndStops(t *testing.T) {
-	test := newWatchdogTest(t, true, &cmdcontext.CmdCtx{}, 100*time.Millisecond)
+	test := newWatchdogTest(t, true, &cmdcontext.CmdCtx{})
 	done := test.run()
 
 	first := test.waitStarted(1)
@@ -244,7 +260,7 @@ func TestWatchdogRestartsAndStops(t *testing.T) {
 // TestWatchdogNotRestartable pins that tarantool that dies is not started
 // again when the configuration does not say restart_on_failure.
 func TestWatchdogNotRestartable(t *testing.T) {
-	test := newWatchdogTest(t, false, &cmdcontext.CmdCtx{}, 100*time.Millisecond)
+	test := newWatchdogTest(t, false, &cmdcontext.CmdCtx{})
 	done := test.run()
 
 	first := test.waitStarted(1)
@@ -264,7 +280,7 @@ func TestWatchdogIntegrityHardStop(t *testing.T) {
 	cmdCtx.Cli.IntegrityCheckPeriod = 1
 	cmdCtx.Integrity = integrity.IntegrityCtx{Repository: &tamperedRepository{}}
 
-	test := newWatchdogTest(t, true, cmdCtx, 100*time.Millisecond)
+	test := newWatchdogTest(t, true, cmdCtx)
 	done := test.run()
 
 	test.waitStarted(1)
@@ -280,6 +296,148 @@ func TestWatchdogIntegrityHardStop(t *testing.T) {
 	assert.Contains(t, test.log.String(), "(ERROR): periodic integrity check failed:")
 	assert.Contains(t, test.log.String(), "is not restarted")
 	assert.NoFileExists(t, test.inst.PIDFile)
+}
+
+// shortTempDir returns a directory under /tmp, whose path leaves room for a
+// unix socket in it.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+
+	//nolint:usetesting // t.TempDir is too deep for a socket path on macOS.
+	dir, err := os.MkdirTemp("/tmp", "ttw")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	return dir
+}
+
+// moveRunDir changes where the configuration puts the sockets, as an edit of
+// run_dir would, and returns the new context.
+func (test *watchdogTest) moveRunDir() InstanceCtx {
+	test.t.Helper()
+
+	runDir := shortTempDir(test.t)
+
+	test.mu.Lock()
+	defer test.mu.Unlock()
+
+	test.inst.ConsoleSocket = filepath.Join(runDir, "tarantool.control")
+	test.inst.BinaryPort = filepath.Join(runDir, "tarantool.sock")
+
+	return test.inst
+}
+
+// setRestartable changes what the configuration says of restart_on_failure.
+func (test *watchdogTest) setRestartable(restartable bool) {
+	test.mu.Lock()
+	defer test.mu.Unlock()
+
+	test.restartable = restartable
+}
+
+// waitSockets waits for the sockets of inst to exist.
+func waitSockets(t *testing.T, inst *InstanceCtx) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		_, consoleErr := os.Stat(inst.ConsoleSocket)
+		_, binaryErr := os.Stat(inst.BinaryPort)
+
+		return consoleErr == nil && binaryErr == nil
+	}, 20*time.Second, 10*time.Millisecond, "tarantool did not create its sockets")
+}
+
+// assertNoSockets asserts that the sockets of inst are gone.
+func assertNoSockets(t *testing.T, inst *InstanceCtx) {
+	t.Helper()
+
+	assert.NoFileExists(t, inst.ConsoleSocket)
+	assert.NoFileExists(t, inst.BinaryPort)
+}
+
+// TestWatchdogCleanupAfterHardStop pins that the watchdog removes the sockets
+// tarantool leaves when it is killed, here by a failed integrity check.
+func TestWatchdogCleanupAfterHardStop(t *testing.T) {
+	cmdCtx := &cmdcontext.CmdCtx{}
+
+	cmdCtx.Cli.IntegrityCheckPeriod = 1
+	cmdCtx.Integrity = integrity.IntegrityCtx{Repository: &tamperedRepository{}}
+
+	test := newWatchdogTest(t, true, cmdCtx)
+	done := test.run()
+
+	test.waitStarted(1)
+	waitSockets(t, &test.inst)
+
+	require.ErrorIs(t, waitDone(t, done), errTampered)
+	assertNoSockets(t, &test.inst)
+}
+
+// TestWatchdogCleanupAfterRunDirChange pins that the sockets removed after
+// tarantool exits are the ones it ran with, when the configuration has moved
+// them meanwhile: at the end of the watchdog when the instance is not
+// restarted, and before the next start when it is.
+func TestWatchdogCleanupAfterRunDirChange(t *testing.T) {
+	for _, restartable := range []bool{false, true} {
+		t.Run("restartable="+strconv.FormatBool(restartable), func(t *testing.T) {
+			test := newWatchdogTest(t, true, &cmdcontext.CmdCtx{})
+			done := test.run()
+
+			first := test.waitStarted(1)
+			old := test.inst
+
+			waitSockets(t, &old)
+
+			moved := test.moveRunDir()
+
+			test.setRestartable(restartable)
+
+			// Killed, tarantool leaves its sockets behind.
+			require.NoError(t, syscall.Kill(first, syscall.SIGKILL))
+
+			if restartable {
+				test.waitStarted(2)
+				waitSockets(t, &moved)
+				assertNoSockets(t, &old)
+
+				require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGINT))
+			}
+
+			require.NoError(t, waitDone(t, done))
+			assertNoSockets(t, &old)
+			assertNoSockets(t, &moved)
+		})
+	}
+}
+
+// TestWatchdogForwardsStopSignal pins that a stop signal reaches tarantool
+// as it was sent: SIGQUIT stays SIGQUIT, which tt quit relies on.
+func TestWatchdogForwardsStopSignal(t *testing.T) {
+	// Without a core file for the SIGQUIT tarantool dies of.
+	var limit syscall.Rlimit
+
+	require.NoError(t, syscall.Getrlimit(syscall.RLIMIT_CORE, &limit))
+
+	noCore := syscall.Rlimit{Cur: 0, Max: limit.Max}
+
+	require.NoError(t, syscall.Setrlimit(syscall.RLIMIT_CORE, &noCore))
+	t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_CORE, &limit) })
+
+	test := newWatchdogTest(t, true, &cmdcontext.CmdCtx{})
+	done := test.run()
+
+	test.waitStarted(1)
+	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGQUIT))
+	require.NoError(t, waitDone(t, done))
+
+	exits := test.exitsSoFar()
+	require.Len(t, exits, 1)
+	require.NotNil(t, exits[0].State)
+
+	status, ok := exits[0].State.Sys().(syscall.WaitStatus)
+	require.True(t, ok)
+	assert.True(t, status.Signaled(), "tarantool exited with %v", exits[0].State)
+	assert.Equal(t, syscall.SIGQUIT, status.Signal())
 }
 
 // readPidFile reads the pid in a pid file.

@@ -825,17 +825,12 @@ func Start(cmdCtx *cmdcontext.CmdCtx, inst *InstanceCtx) error {
 
 	logger.Println("[INFO] Start") // Create a log file before any other actions.
 
-	src := &instanceSource{
-		cmdCtx: cmdCtx,
-		inst:   *inst,
-		log: &watchdogLog{
-			logger:      logger,
-			checkPeriod: time.Duration(cmdCtx.Cli.IntegrityCheckPeriod) * time.Second,
-		},
-		refresh: func() (InstanceCtx, error) {
-			return refreshFromConfig(cmdCtx, inst)
-		},
-	}
+	src := newInstanceSource(cmdCtx, inst, &watchdogLog{
+		logger:      logger,
+		checkPeriod: time.Duration(cmdCtx.Cli.IntegrityCheckPeriod) * time.Second,
+	}, func() (InstanceCtx, error) {
+		return refreshFromConfig(cmdCtx, inst)
+	})
 
 	engine, err := supervisor.New(src, watchdogOptions(cmdCtx, src))
 	if err != nil {
