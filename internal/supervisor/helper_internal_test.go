@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -44,6 +45,9 @@ const (
 	// modeOrphan starts a stubborn grandchild that inherits its standard
 	// output, writes its pid into the grandchild file and exits at once.
 	modeOrphan = "orphan"
+	// modePanicNil runs a check that panics with nil and exits 0 if the
+	// engine took it for a failed check, 1 if not.
+	modePanicNil = "panic-nil"
 )
 
 // Exit codes of modeServe per stop signal.
@@ -85,6 +89,8 @@ func runHelper(mode string) int {
 		orphan(dir)
 
 		return 0
+	case modePanicNil:
+		return checkPanicNil()
 	}
 
 	fmt.Fprintf(os.Stderr, "unknown helper mode %q\n", mode)
@@ -190,6 +196,24 @@ func family(dir string) int {
 // orphan leaves a stubborn grandchild holding its standard output behind.
 func orphan(dir string) {
 	startGrandchild(dir)
+}
+
+// checkPanicNil runs a check that panics with nil through the engine's
+// wrapper of Options.Check.
+func checkPanicNil() int {
+	engine := &Engine{opts: Options{Check: func(context.Context) error {
+		panic(nil)
+	}}}
+
+	err := engine.check(context.Background())
+
+	_, _ = fmt.Fprintln(os.Stdout, err)
+
+	if errors.Is(err, ErrCheckPanicked) {
+		return 0
+	}
+
+	return 1
 }
 
 // startGrandchild starts a stubborn helper that shares the standard output,

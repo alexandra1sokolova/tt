@@ -249,6 +249,26 @@ func TestSpecCommand(t *testing.T) {
 	}
 }
 
+// TestCheckPanicsNil pins that a check that panics with nil fails, also
+// under GODEBUG=panicnil=1, where recover returns nil for it. GODEBUG is read
+// when the process starts, so the check runs in a helper process.
+func TestCheckPanicsNil(t *testing.T) {
+	exe, err := os.Executable()
+	require.NoError(t, err)
+
+	for _, godebug := range []string{"", "panicnil=1"} {
+		t.Run("GODEBUG="+godebug, func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), exe)
+
+			cmd.Env = append(os.Environ(), helperEnv+"="+modePanicNil, "GODEBUG="+godebug)
+
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, "the check passed: %s", out)
+			assert.Contains(t, string(out), ErrCheckPanicked.Error())
+		})
+	}
+}
+
 // emptyJoinError is an error joining nothing.
 type emptyJoinError struct{}
 

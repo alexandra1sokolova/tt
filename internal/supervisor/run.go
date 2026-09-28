@@ -484,14 +484,18 @@ func (e *Engine) check(ctx context.Context) error {
 	var err error
 
 	func() {
+		// A panic is told by the check not returning, not by what recover
+		// returns: under GODEBUG=panicnil=1 a panic(nil) recovers as nil.
+		returned := false
+
 		defer func() {
-			recovered := recover()
-			if recovered != nil {
-				err = fmt.Errorf("%w: %v", ErrCheckPanicked, recovered)
+			if !returned {
+				err = fmt.Errorf("%w: %v", ErrCheckPanicked, recover())
 			}
 		}()
 
 		err = e.opts.Check(ctx)
+		returned = true
 	}()
 
 	return err
