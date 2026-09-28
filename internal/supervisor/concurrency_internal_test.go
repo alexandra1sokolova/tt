@@ -15,17 +15,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSignalStormAcrossRestarts sends a burst of signals from several
-// goroutines at a child that keeps exiting and being restarted. It pins that
-// every signal the engine receives is handled exactly once and in its right
-// place: forwarded only while a child runs, and then only to that child;
-// dropped only while none runs; the reload hook run for each reload signal;
-// and the stop, sent last, still ends Run.
+// TestSignalStormAcrossRestarts sends bursts of signals from several
+// goroutines, round after round, alternately while a child runs and while
+// none does. It pins that every signal the engine receives is handled
+// exactly once and in its right place: forwarded, with the reload hook run
+// for each reload signal, while a child runs, and then only to that child;
+// dropped, reload hook still run, while none runs; and a stop, sent last,
+// still ends Run.
+//
+// The phases do not depend on timing. In a running phase the child stays up
+// until the test kills it after the burst is handled; in an idle phase the
+// Source holds the next start until the burst is sent, and the engine takes
+// the signals that came before the start as with no child.
 //
 // Injected, every signal sent reaches the engine, so the counts are exact.
 // Through the relay the engine runs on, a signal is sent the way the Go
 // runtime delivers one, dropped when the relay's input is full, with the
-// runtime's own SIGURG and SIGCHLD mixed in; then the counts can only be
+// runtime's own SIGURG and SIGCHLD mixed in; then the counts are only
 // bounded by what was accepted.
 func TestSignalStormAcrossRestarts(t *testing.T) {
 	t.Run("injected", func(t *testing.T) { signalStorm(t, false) })
@@ -36,19 +42,40 @@ func signalStorm(t *testing.T, viaRelay bool) {
 	t.Helper()
 
 	const (
-		senders   = 8
-		perSender = 200
+		rounds  = 3
+		senders = 8
+		// perSender keeps a burst below the buffers of the relay, so that
+		// only its input, not its output, can drop a signal.
+		perSender = 12
 		reloadsIn = 4 // One signal in reloadsIn is the reload signal.
+		// Per burst: the reload signals, and the signals to forward.
+		burstReloads  = senders * ((perSender + reloadsIn - 1) / reloadsIn)
+		burstForwards = senders*perSender - burstReloads
 	)
 
 	dir := t.TempDir()
-	src := fixedSource(helperSpec(t, dir, modeExit, codeEnv+"=1"), true)
+	src := fixedSource(helperSpec(t, dir, modeServe), true)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+
+	// Every start but the first waits for the idle burst to be sent.
+	src.next = func(ctx context.Context, n int) (Spec, error) {
+		if n > 1 {
+			entered <- struct{}{}
+
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		}
+
+		return helperSpec(t, dir, modeServe), nil
+	}
 
 	var reloads, accepted atomic.Int32
 
 	sup := newHarness(t, src, Options{
 		StopSignals:  stopSignals,
-		RestartDelay: 20 * time.Millisecond,
 		ReloadSignal: syscall.SIGHUP,
 		OnReload: func() error {
 			reloads.Add(1)
@@ -62,10 +89,25 @@ func signalStorm(t *testing.T, viaRelay bool) {
 		accepted.Add(1)
 	}
 
+	// queued is what waits for the engine to read it.
+	queued := func() int { return len(sup.signals) }
+
 	if viaRelay {
 		raw := make(chan os.Signal, signalBuffer)
+		relayed := make(chan (<-chan os.Signal), 1)
 
-		sup.engine.subscribe = func() (<-chan os.Signal, func()) { return relay(raw, func() {}) }
+		sup.engine.subscribe = func() (<-chan os.Signal, func()) {
+			out, stop := relay(raw, func() {})
+			relayed <- out
+
+			return out, stop
+		}
+		queued = func() int {
+			out := <-relayed
+			relayed <- out
+
+			return len(out)
+		}
 		// Like the runtime: never block, drop what does not fit.
 		send = func(sig syscall.Signal) {
 			select {
@@ -78,32 +120,68 @@ func signalStorm(t *testing.T, viaRelay bool) {
 		}
 	}
 
-	sup.start()
-	waitEvent[Started](t, sup.rec, 1)
+	burst := func() {
+		var group sync.WaitGroup
 
-	var burst sync.WaitGroup
+		for range senders {
+			group.Go(func() {
+				for index := range perSender {
+					sig := syscall.SIGUSR1
+					if index%reloadsIn == 0 {
+						sig = syscall.SIGHUP
+					}
 
-	for range senders {
-		burst.Go(func() {
-			for index := range perSender {
-				sig := syscall.SIGUSR1
-				if index%reloadsIn == 0 {
-					sig = syscall.SIGHUP
+					send(sig)
+
+					if viaRelay && index%reloadsIn == 1 {
+						send(syscall.SIGURG)
+						send(syscall.SIGCHLD)
+					}
 				}
+			})
+		}
 
-				send(sig)
-
-				if viaRelay {
-					send(syscall.SIGURG)
-					send(syscall.SIGCHLD)
-				}
-
-				time.Sleep(time.Millisecond)
-			}
-		})
+		group.Wait()
 	}
 
-	burst.Wait()
+	waitHandled := func() {
+		require.Eventually(t, func() bool {
+			handled, _ := eventsOf[SignalReceived](sup.rec)
+
+			return len(handled) == int(accepted.Load())
+		}, waitTimeout, pollInterval, "the burst was not handled")
+	}
+
+	sup.start()
+
+	for round := 1; round <= rounds; round++ {
+		started := waitEvent[Started](t, sup.rec, round)
+		waitReady(t, dir, started.Pid)
+
+		burst()
+		waitHandled()
+
+		require.NoError(t, syscall.Kill(started.Pid, syscall.SIGKILL))
+		<-entered
+
+		before := accepted.Load()
+
+		burst()
+
+		// The whole burst has to wait for the engine, not be on its way
+		// through the relay, when the start goes ahead: a signal that
+		// arrives while the child starts goes to the child.
+		require.Eventually(t, func() bool {
+			return queued() == int(accepted.Load()-before)
+		}, waitTimeout, pollInterval, "the burst did not reach the engine")
+
+		release <- struct{}{}
+
+		waitHandled()
+	}
+
+	last := waitEvent[Started](t, sup.rec, rounds+1)
+	waitReady(t, dir, last.Pid)
 
 	// A stop sent through the relay can be dropped as well: resend it
 	// until Run returns, as a user would.
@@ -144,16 +222,11 @@ func signalStorm(t *testing.T, viaRelay bool) {
 			switch event.Action {
 			case ActionForward:
 				require.True(t, running, "a signal forwarded while no child ran")
+				require.NoError(t, event.Err, "the child to forward to was gone")
 			case ActionDrop:
 				require.False(t, running, "a signal dropped while a child ran")
 				require.NoError(t, event.Err)
 			case ActionReload, ActionStop, ActionIgnore:
-			}
-
-			// A child that has exited but is not yet reaped refuses a
-			// signal; nothing else may.
-			if event.Err != nil {
-				require.ErrorIs(t, event.Err, os.ErrProcessDone)
 			}
 		}
 	}
@@ -161,25 +234,25 @@ func signalStorm(t *testing.T, viaRelay bool) {
 	forwards, drops := actions[ActionForward], actions[ActionDrop]
 	handled := forwards + drops + actions[ActionReload] + actions[ActionStop]
 	assert.Equal(t, actions[ActionReload], int(reloads.Load()))
+	assert.Equal(t, int(accepted.Load()), handled)
 
 	if viaRelay {
-		// The relay drops only when its own buffer is full; it never
-		// invents a signal.
-		assert.LessOrEqual(t, handled, int(accepted.Load()))
 		assert.GreaterOrEqual(t, actions[ActionStop], 1)
+		// Both phases have to be there for the test to test anything.
+		assert.Positive(t, forwards)
+		assert.Positive(t, drops)
 	} else {
-		assert.Equal(t, int(accepted.Load()), handled)
 		assert.Equal(t, 1, actions[ActionStop])
-		assert.Equal(t, int32(senders*perSender/reloadsIn), reloads.Load())
+		assert.Equal(t, rounds*burstForwards, forwards)
+		assert.Equal(t, rounds*burstForwards, drops)
+		assert.Equal(t, 2*rounds*burstReloads, actions[ActionReload])
 	}
 
 	nexts, restarts := src.calls()
-	assert.Contains(t, []int{0, 1}, nexts-restarts)
+	assert.Equal(t, rounds+1, nexts)
+	assert.Equal(t, rounds, restarts)
 	t.Logf("%d starts, %d accepted, %d handled: %d forwarded, %d dropped",
 		nexts, accepted.Load(), handled, forwards, drops)
-	// The burst has to span both states for the test to test anything.
-	assert.Positive(t, forwards)
-	assert.Positive(t, drops)
 	sup.assertNoChildren()
 }
 
