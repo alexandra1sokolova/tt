@@ -444,7 +444,7 @@ func (e *Engine) startChecks(ctx context.Context) (<-chan error, func() error) {
 			if checkCtx.Err() != nil {
 				// The child exited while the check ran. What the check found
 				// still counts; its giving up on the cancellation does not.
-				if !errors.Is(err, context.Canceled) {
+				if !onlyCancelled(err) {
 					late = err
 				}
 
@@ -471,6 +471,39 @@ func (e *Engine) startChecks(ctx context.Context) (<-chan error, func() error) {
 
 		return late
 	}
+}
+
+// onlyCancelled reports whether err says nothing but that the check was
+// cancelled: every error at the leaves of its tree, reached through Unwrap
+// and through the errors joined in it, is context.Canceled. Anything else it
+// carries is a finding, and a finding fails the check, so the answer errs
+// towards a failure: nil, or a leaf of any other kind, is not a cancellation.
+func onlyCancelled(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	//nolint:errorlint // Each level of the tree is examined, not the chain.
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		leaves := wrapped.Unwrap()
+		if len(leaves) == 0 {
+			return false
+		}
+
+		for _, leaf := range leaves {
+			if !onlyCancelled(leaf) {
+				return false
+			}
+		}
+
+		return true
+	case interface{ Unwrap() error }:
+		return onlyCancelled(wrapped.Unwrap())
+	}
+
+	// A leaf: nothing left to unwrap.
+	return errors.Is(err, context.Canceled)
 }
 
 // pause waits the restart delay and reports whether a stop ended it. A stop

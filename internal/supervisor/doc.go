@@ -99,7 +99,10 @@
 // When the child exits while a check runs, the engine cancels the check's
 // context and waits for it. An error it returns still counts as a failed
 // check, reported by a Checked event, and ends Run the same way, unless it
-// only reports the cancellation (it matches context.Canceled).
+// reports nothing but the cancellation: every error at the leaves of its
+// tree, through Unwrap and through joined errors, is context.Canceled. An
+// error that carries the cancellation next to anything else, as
+// errors.Join(finding, ctx.Err()) does, is a failed check.
 //
 // # Starting
 //
