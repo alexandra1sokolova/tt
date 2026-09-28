@@ -1,8 +1,14 @@
 package running
 
 import (
+	"context"
 	"os"
+	"os/exec"
+	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
+	"github.com/tarantool/tt/v3/internal/supervisor"
 )
 
 const filePollInterval = 500 * time.Millisecond
@@ -22,4 +28,63 @@ func waitForFile(filePath string) int {
 	}
 
 	return retries
+}
+
+// specRun is a Spec of an instance running as a process of the test.
+type specRun struct {
+	cmd     *exec.Cmd
+	spec    supervisor.Spec
+	done    chan struct{}
+	waitErr error
+}
+
+// startSpec runs spec once, as tt start --interactive does.
+func startSpec(t *testing.T, ctx context.Context, spec supervisor.Spec) *specRun {
+	t.Helper()
+
+	run := &specRun{cmd: spec.Command(ctx), spec: spec, done: make(chan struct{}), waitErr: nil}
+	require.NoError(t, run.cmd.Start())
+
+	go func() {
+		run.waitErr = run.cmd.Wait()
+
+		close(run.done)
+	}()
+
+	return run
+}
+
+// alive reports whether the process has not exited.
+func (run *specRun) alive() bool {
+	select {
+	case <-run.done:
+		return false
+	default:
+		return true
+	}
+}
+
+// wait waits for the process to exit and returns what exec.Cmd.Wait did.
+func (run *specRun) wait() error {
+	<-run.done
+
+	return run.waitErr
+}
+
+// stop stops the process with the stop signal of its Spec, and kills it if
+// it has not exited by stopTimeout.
+func (run *specRun) stop() {
+	if !run.alive() {
+		return
+	}
+
+	_ = run.cmd.Process.Signal(run.spec.StopSignal)
+
+	select {
+	case <-run.done:
+	case <-time.After(stopTimeout):
+		_ = run.cmd.Process.Kill()
+
+		<-run.done
+	}
 }
