@@ -199,6 +199,8 @@ type fakeTimer struct {
 	at, period time.Duration
 	ch         chan time.Time
 	stopped    bool
+	// delivered counts the ticks that went into ch.
+	delivered int
 }
 
 // fakeClock is a clock that moves only when the script advances it.
@@ -206,6 +208,8 @@ type fakeClock struct {
 	mu     sync.Mutex
 	now    time.Duration
 	timers []*fakeTimer
+	// tickers are all the tickers ever made, stopped ones too.
+	tickers []*fakeTimer
 }
 
 func (clk *fakeClock) after(d time.Duration) (<-chan time.Time, func()) {
@@ -222,12 +226,16 @@ func (clk *fakeClock) add(delay, period time.Duration) (<-chan time.Time, func()
 
 	timer := &fakeTimer{at: clk.now + delay, period: period, ch: make(chan time.Time, 1)}
 
-	if delay <= 0 && period == 0 {
+	switch {
+	case delay <= 0 && period == 0:
 		// An expired timer is ready at once, as a real one is.
 		timer.ch <- time.Time{}
 
 		timer.stopped = true
-	} else {
+	case period > 0:
+		clk.timers = append(clk.timers, timer)
+		clk.tickers = append(clk.tickers, timer)
+	default:
 		clk.timers = append(clk.timers, timer)
 	}
 
@@ -237,6 +245,43 @@ func (clk *fakeClock) add(delay, period time.Duration) (<-chan time.Time, func()
 
 		timer.stopped = true
 	}
+}
+
+// fakeTicker is what the model sees of a ticker of the fake clock.
+type fakeTicker struct {
+	// pending tells that a tick waits in the channel for its reader.
+	pending bool
+}
+
+// activeTickers are the tickers made by every and not stopped.
+func (clk *fakeClock) activeTickers() []fakeTicker {
+	clk.mu.Lock()
+	defer clk.mu.Unlock()
+
+	var tickers []fakeTicker
+
+	for _, timer := range clk.timers {
+		if timer.period > 0 && !timer.stopped {
+			tickers = append(tickers, fakeTicker{pending: len(timer.ch) > 0})
+		}
+	}
+
+	return tickers
+}
+
+// consumedTicks counts the ticks that the readers of all the tickers ever made
+// have taken from their channels.
+func (clk *fakeClock) consumedTicks() int {
+	clk.mu.Lock()
+	defer clk.mu.Unlock()
+
+	consumed := 0
+
+	for _, ticker := range clk.tickers {
+		consumed += ticker.delivered - len(ticker.ch)
+	}
+
+	return consumed
 }
 
 // advance moves the time and fires what is due, in order. A tick that finds
@@ -264,6 +309,7 @@ func (clk *fakeClock) advance(d time.Duration) {
 
 		select {
 		case next.ch <- time.Time{}:
+			next.delivered++
 		default:
 		}
 
@@ -306,6 +352,10 @@ type fuzzRun struct {
 	failed        map[int]bool
 	reported      map[int]bool
 	checkFailed   bool
+	// checksRunning counts the calls of Check that have not returned, and
+	// checkCalls all the calls.
+	checksRunning int
+	checkCalls    int
 	failNext      int
 	failStart     int
 	restartPlan   []uint8
@@ -446,7 +496,15 @@ func (run *fuzzRun) exitLocked(proc *fakeProc) {
 func (run *fuzzRun) check(ctx context.Context) error {
 	var owner int
 
-	run.locked(func() { owner = run.running })
+	run.locked(func() {
+		owner = run.running
+
+		run.checksRunning++
+
+		run.checkCalls++
+	})
+
+	defer run.locked(func() { run.checksRunning-- })
 
 	if owner == 0 {
 		run.failf("a check ran while no child was running")
@@ -1011,6 +1069,41 @@ func (run *fuzzRun) checkSettled() {
 			run.failf("child %d runs, its pid file holds %d (present %v)", run.running, pid, ok)
 		case run.running == 0 && ok:
 			run.failf("no child runs, its pid file holds %d", pid)
+		}
+	}
+
+	if !run.isFinished() {
+		run.checkCheckPeriods()
+	}
+}
+
+// checkCheckPeriods accounts for the check periods apart from the checks:
+// the fake clock knows every ticker it made. While a child runs with checks
+// configured and no check has failed, one check ticker runs, and none while
+// no child runs. A tick left waiting in its channel means a period passed
+// with no check started, which is allowed only while a check still runs:
+// the ticks that come meanwhile coalesce into the next check. And every tick
+// a reader took from its channel started one check.
+func (run *fuzzRun) checkCheckPeriods() {
+	tickers := run.clock.activeTickers()
+
+	if consumed := run.clock.consumedTicks(); consumed != run.checkCalls {
+		run.failf("%d check periods were taken and %d checks started", consumed,
+			run.checkCalls)
+	}
+
+	switch {
+	case !run.cfg.checks || run.checkFailed:
+		return
+	case run.running != 0 && len(tickers) != 1:
+		run.failf("child %d runs with %d check tickers", run.running, len(tickers))
+	case run.running == 0 && len(tickers) != 0:
+		run.failf("%d check tickers run with no child", len(tickers))
+	}
+
+	for _, ticker := range tickers {
+		if ticker.pending && run.checksRunning == 0 {
+			run.failf("a check period passed and no check started (child %d)", run.running)
 		}
 	}
 }
