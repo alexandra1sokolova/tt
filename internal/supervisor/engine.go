@@ -125,10 +125,14 @@ func (err *Error) Unwrap() error {
 type Engine struct {
 	source Source
 	opts   Options
-	start  StartFunc
 	// subscribe starts delivering signals; tests replace it to inject them.
 	subscribe func() (<-chan os.Signal, func())
-	ran       atomic.Bool
+	// spawn starts a child; tests replace it with processes they drive.
+	spawn func(ctx context.Context, spec *Spec) (*child, error)
+	// clock makes the engine's timers; tests replace it with one they
+	// advance.
+	clock clock
+	ran   atomic.Bool
 }
 
 // New checks the options and returns an engine that is ready to Run.
@@ -146,9 +150,12 @@ func New(source Source, opts Options) (*Engine, error) {
 	return &Engine{
 		source:    source,
 		opts:      opts,
-		start:     start,
 		subscribe: subscribeOS,
-		ran:       atomic.Bool{},
+		spawn: func(ctx context.Context, spec *Spec) (*child, error) {
+			return startChild(ctx, spec, start)
+		},
+		clock: realClock{},
+		ran:   atomic.Bool{},
 	}, nil
 }
 

@@ -184,7 +184,7 @@ func (e *Engine) loop(ctx context.Context, signals <-chan os.Signal, state *runS
 
 // launch starts the child and writes its pid file.
 func (e *Engine) launch(ctx context.Context, spec *Spec, state *runState) error {
-	proc, err := startChild(ctx, spec, e.start)
+	proc, err := e.spawn(ctx, spec)
 	if err != nil {
 		return &Error{Op: OpStart, Err: err}
 	}
@@ -247,8 +247,11 @@ type supervision struct {
 	proc   *child
 	spec   *Spec
 	result outcome
-	// killTimer fires Spec.StopTimeout after the first stop.
-	killTimer *time.Timer
+	// killTimer fires Spec.StopTimeout after the first stop; nil while none
+	// is armed.
+	killTimer <-chan time.Time
+	// cancelKill cancels the kill timer.
+	cancelKill func()
 }
 
 // supervise handles signals, checks and the stop of the child until it
@@ -270,7 +273,8 @@ func (e *Engine) supervise(ctx context.Context, signals <-chan os.Signal, spec *
 			stopped:  false,
 			checkErr: nil,
 		},
-		killTimer: nil,
+		killTimer:  nil,
+		cancelKill: nil,
 	}
 	defer run.stopKillTimer()
 
@@ -296,7 +300,7 @@ func (e *Engine) supervise(ctx context.Context, signals <-chan os.Signal, spec *
 			cancelled = nil
 
 			_ = run.stop(spec.StopSignal)
-		case <-run.killTimerC():
+		case <-run.killTimer:
 			run.killTimer = nil
 
 			e.emit(Killed{
@@ -310,18 +314,9 @@ func (e *Engine) supervise(ctx context.Context, signals <-chan os.Signal, spec *
 	}
 }
 
-// killTimerC is the channel of the kill timer, nil while none is armed.
-func (run *supervision) killTimerC() <-chan time.Time {
-	if run.killTimer == nil {
-		return nil
-	}
-
-	return run.killTimer.C
-}
-
 func (run *supervision) stopKillTimer() {
-	if run.killTimer != nil {
-		run.killTimer.Stop()
+	if run.cancelKill != nil {
+		run.cancelKill()
 	}
 }
 
@@ -331,7 +326,7 @@ func (run *supervision) stop(sig syscall.Signal) error {
 
 	if !run.result.stopped {
 		run.result.stopped = true
-		run.killTimer = time.NewTimer(run.spec.StopTimeout)
+		run.killTimer, run.cancelKill = run.engine.clock.after(run.spec.StopTimeout)
 	}
 
 	return err
@@ -432,15 +427,17 @@ func (e *Engine) startChecks(ctx context.Context) (<-chan error, func() error) {
 		late    error
 	)
 
+	// The ticker runs from here, not from when the goroutine gets to it.
+	ticks, stopTicks := e.clock.every(e.opts.CheckPeriod)
+
 	checker.Go(func() {
-		ticker := time.NewTicker(e.opts.CheckPeriod)
-		defer ticker.Stop()
+		defer stopTicks()
 
 		for {
 			select {
 			case <-checkCtx.Done():
 				return
-			case <-ticker.C:
+			case <-ticks:
 			}
 
 			err := e.opts.Check(checkCtx)
@@ -482,12 +479,12 @@ func (e *Engine) startChecks(ctx context.Context) (<-chan error, func() error) {
 func (e *Engine) pause(ctx context.Context, signals <-chan os.Signal) bool {
 	e.emit(Restarting{Delay: e.opts.RestartDelay})
 
-	timer := time.NewTimer(e.opts.RestartDelay)
-	defer timer.Stop()
+	expired, cancel := e.clock.after(e.opts.RestartDelay)
+	defer cancel()
 
 	for {
 		select {
-		case <-timer.C:
+		case <-expired:
 			return false
 		case <-ctx.Done():
 			return true

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"syscall"
 )
@@ -31,13 +32,11 @@ func StartCmd(cmd *exec.Cmd) error {
 
 // child is a started child process.
 type child struct {
-	cmd *exec.Cmd
 	pid int
-	// group tells that the child leads a process group of its own and signals
-	// go to the group.
-	group bool
 	// done receives the exit of the child exactly once.
 	done chan Exit
+	// send delivers a signal to the child, or to its process group.
+	send func(sig syscall.Signal) error
 }
 
 // command prepares the command for spec.
@@ -75,10 +74,9 @@ func startChild(ctx context.Context, spec *Spec, start StartFunc) (*child, error
 	}
 
 	proc := &child{
-		cmd:   cmd,
-		pid:   cmd.Process.Pid,
-		group: spec.ProcessGroup,
-		done:  make(chan Exit, 1),
+		pid:  cmd.Process.Pid,
+		done: make(chan Exit, 1),
+		send: signaller(cmd.Process, spec.ProcessGroup),
 	}
 
 	go func() {
@@ -89,21 +87,29 @@ func startChild(ctx context.Context, spec *Spec, start StartFunc) (*child, error
 	return proc, nil
 }
 
-// signal sends sig to the child, or to its process group.
-func (proc *child) signal(sig syscall.Signal) error {
-	if proc.group {
-		err := syscall.Kill(-proc.pid, sig)
+// signaller sends signals to process, or to the process group it leads.
+func signaller(process *os.Process, group bool) func(sig syscall.Signal) error {
+	return func(sig syscall.Signal) error {
+		if group {
+			err := syscall.Kill(-process.Pid, sig)
+			if err != nil {
+				return fmt.Errorf("sending %s to the process group %d: %w", sig, process.Pid,
+					err)
+			}
+
+			return nil
+		}
+
+		err := process.Signal(sig)
 		if err != nil {
-			return fmt.Errorf("sending %s to the process group %d: %w", sig, proc.pid, err)
+			return fmt.Errorf("sending %s to the process %d: %w", sig, process.Pid, err)
 		}
 
 		return nil
 	}
+}
 
-	err := proc.cmd.Process.Signal(sig)
-	if err != nil {
-		return fmt.Errorf("sending %s to the process %d: %w", sig, proc.pid, err)
-	}
-
-	return nil
+// signal sends sig to the child, or to its process group.
+func (proc *child) signal(sig syscall.Signal) error {
+	return proc.send(sig)
 }
