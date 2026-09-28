@@ -895,7 +895,11 @@ func (run *fuzzRun) apply(step fuzzStep) {
 
 // engineStacks returns the stacks of the goroutines of the engine: the one
 // running Run, recognised by the closure that calls it even before it has
-// got that far, and the checker.
+// got that far, and the checker. A goroutine is recognised by a frame of the
+// engine, so every goroutine the engine starts must have one from the
+// moment it is created, before it first runs: one started through a helper
+// such as sync.WaitGroup.Go shows only the helper's frame until then, and
+// would pass for no goroutine at all.
 func engineStacks() []string {
 	buf := make([]byte, 1<<16)
 

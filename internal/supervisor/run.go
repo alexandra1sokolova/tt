@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -423,15 +422,17 @@ func (e *Engine) startChecks(ctx context.Context) (<-chan error, func() error) {
 	checkCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	results := make(chan error)
 
-	var (
-		checker sync.WaitGroup
-		late    error
-	)
+	var late error
 
 	// The ticker runs from here, not from when the goroutine gets to it.
 	ticks, stopTicks := e.clock.every(e.opts.CheckPeriod)
+	// finished is closed when the checker returns. A plain go statement,
+	// rather than a WaitGroup starting it, leaves the goroutine created by
+	// this method, and so recognisable as the engine's, from the start.
+	finished := make(chan struct{})
 
-	checker.Go(func() {
+	go func() {
+		defer close(finished)
 		defer stopTicks()
 
 		for {
@@ -464,11 +465,11 @@ func (e *Engine) startChecks(ctx context.Context) (<-chan error, func() error) {
 				return
 			}
 		}
-	})
+	}()
 
 	return results, func() error {
 		cancel()
-		checker.Wait()
+		<-finished
 
 		return late
 	}
