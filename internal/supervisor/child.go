@@ -63,6 +63,17 @@ func command(ctx context.Context, spec *Spec) *exec.Cmd {
 // it.
 func startChild(ctx context.Context, spec *Spec, start StartFunc) (*child, error) {
 	cmd := command(ctx, spec)
+	handedOver := false
+
+	// A StartFunc that started the process and then failed or panicked has
+	// not handed it over: nobody else knows it, so it is killed and waited
+	// for here, before the error or the panic goes on.
+	defer func() {
+		if !handedOver && cmd.Process != nil {
+			_ = signaller(cmd.Process, spec.ProcessGroup)(syscall.SIGKILL)
+			_ = cmd.Wait()
+		}
+	}()
 
 	err := start(cmd)
 	if err != nil {
@@ -83,6 +94,8 @@ func startChild(ctx context.Context, spec *Spec, start StartFunc) (*child, error
 		err := cmd.Wait()
 		proc.done <- Exit{Pid: proc.pid, State: cmd.ProcessState, Err: err}
 	}()
+
+	handedOver = true
 
 	return proc, nil
 }

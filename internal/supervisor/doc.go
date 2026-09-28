@@ -109,7 +109,10 @@
 // Every child is started by Options.Start, which receives a fully prepared
 // exec.Cmd and has to start it. It is the one place to change how a child is
 // started, for example to execute bytes that were verified in memory rather
-// than whatever the path names by the time of the exec.
+// than whatever the path names by the time of the exec. A process it
+// started but did not hand over, because it returned an error or panicked
+// after starting it, is killed with SIGKILL (its group, with
+// Spec.ProcessGroup) and waited for before the error or the panic goes on.
 //
 // Detach starts a process that outlives its caller. While the caller lives,
 // it waits for the process in the background, so none is left a zombie.
