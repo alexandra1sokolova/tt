@@ -217,7 +217,9 @@ func TestRestartDelay(t *testing.T) {
 }
 
 // TestSignalsDuringStartup pins that signals arriving while the Source
-// prepares the child are kept and handled, in order, once the child runs.
+// prepares the child are handled, in order, before the child would start,
+// as while no child runs: the reload hook runs and a stop means the child is
+// never started.
 func TestSignalsDuringStartup(t *testing.T) {
 	dir := t.TempDir()
 	entered := make(chan struct{})
@@ -267,10 +269,8 @@ func TestSignalsDuringStartup(t *testing.T) {
 	}
 
 	assert.Equal(t, []string{
-		"started",
 		syscall.SIGHUP.String() + " reload",
 		syscall.SIGTERM.String() + " stop",
-		"exit",
 	}, order)
 
 	nexts, restarts := src.calls()

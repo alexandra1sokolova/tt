@@ -50,7 +50,10 @@
 //
 // Run catches every signal but SIGURG, which the Go runtime sends itself for
 // preemption, and SIGCHLD, which reports the supervisor's own children. Each
-// caught signal is handled exactly once, in arrival order:
+// signal the engine receives is handled exactly once, in the order it was
+// received. That is not the order, or the number, of the signals sent: the
+// kernel merges a signal sent again before the first one was delivered, and
+// the Go runtime drops one it cannot buffer. While a child runs:
 //
 //   - A stop signal (Options.StopSignals) stops the child: it is sent
 //     Spec.StopSignal, or the received signal itself when
@@ -64,22 +67,33 @@
 //   - Any other signal is forwarded to the child.
 //
 // Signals go to the child, or to its whole process group when
-// Spec.ProcessGroup is set. A signal that arrives while the child is being
-// started waits in a buffer and is handled once the child runs. A signal that
-// arrives during the restart delay is handled at once: a stop signal ends Run
-// without a restart, the reload hook runs, and a signal that would have been
-// forwarded is dropped, because there is no child to take it. A signal that
-// arrives while the buffer is full is lost.
+// Spec.ProcessGroup is set.
+//
+// While no child runs, a signal is handled as there is none to take it: a
+// stop signal ends Run, the reload hook runs, and a signal that would have
+// been forwarded is dropped. That holds during the restart delay, where
+// signals are handled as they arrive, and for the signals that have arrived
+// by the moments the engine decides on what to do next: before it asks the
+// Source for a Spec, before it starts the child with that Spec, and before it
+// asks the Source about a restart. So a stop that has arrived by then always
+// wins: no child is started and the Source is not asked anything after it,
+// even when the child's exit or the end of the restart delay is ready at the
+// same moment. A signal that arrives while the child is being started waits
+// in a buffer and is handled, with the child, once it runs. A signal that
+// arrives while that buffer is full is lost.
 //
 // Cancelling the context passed to Run is a stop as well, with
-// Spec.StopSignal.
+// Spec.StopSignal; it wins over a start or a restart in the same way.
 //
 // # Checks
 //
 // With Options.CheckPeriod set, Options.Check runs that often while a child is
 // running. When it returns an error, the child (its group, with
 // Spec.ProcessGroup) is killed with SIGKILL, and once the child has exited
-// Run returns the error without asking about a restart.
+// Run returns the error without asking about a restart. When the child exits
+// while a check runs, the engine cancels the check's context and waits for
+// it: an error it returns still ends Run that way, unless it only reports the
+// cancellation (it matches context.Canceled).
 //
 // # Starting
 //
@@ -88,12 +102,34 @@
 // started, for example to execute bytes that were verified in memory rather
 // than whatever the path names by the time of the exec.
 //
+// Detach starts a process that outlives its caller. While the caller lives,
+// it waits for the process in the background, so none is left a zombie.
+//
 // # Guarantees
 //
 // When Run returns, the child it started last has exited and has been
-// waited for, its pid file is removed, Options.Cleanup has run if the
-// supervisor pid file was created (or none was configured), and the
-// supervisor pid file is removed. A member of the child's process group that
-// outlived the child is not waited for: only the stop timeout and a failed
-// check kill the whole group.
+// waited for, the checks have stopped, the child's pid file is removed,
+// Options.Cleanup has run if the supervisor pid file was taken (or none was
+// configured), and the supervisor pid file is removed.
+//
+// The same holds when a callback panics: the child is killed with SIGKILL
+// and waited for, the checks stop, the pid files are removed, Cleanup runs
+// (the supervisor pid file goes even if Cleanup panics as well), the signals
+// are no longer caught, and then the panic goes on to the caller of Run.
+//
+// # Limits
+//
+// These are part of the contract rather than defects:
+//
+//   - A member of the child's process group that outlives the child is
+//     neither killed nor waited for: only the stop timeout and a failed check
+//     kill the whole group, and only while the child still runs.
+//   - A signal sent to the group after the child has been waited for, in the
+//     moment before the engine sees the exit, goes to whatever process group
+//     has that id by then; the id can be reused once the whole group is gone.
+//   - A Check that ignores the cancellation of its context, or an
+//     io.Writer given as Spec.Stdout or Spec.Stderr that blocks, keeps Run
+//     from returning until it returns.
+//   - Callbacks must not rely on being called after a panic in another
+//     callback: only Cleanup is.
 package supervisor
