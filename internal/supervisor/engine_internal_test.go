@@ -2,7 +2,6 @@ package supervisor
 
 import (
 	"context"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1044,19 +1043,4 @@ func TestSubscribeOS(t *testing.T) {
 		assert.Failf(t, "unexpected signal", "%v", sig)
 	case <-time.After(100 * time.Millisecond):
 	}
-}
-
-// TestRemovePidFile pins that only a pid file naming the given pid is
-// removed.
-func TestRemovePidFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "x.pid")
-
-	require.NoError(t, removePidFile(path, 1))
-	require.NoError(t, os.WriteFile(path, []byte("42"), 0o600))
-	require.NoError(t, removePidFile(path, 43))
-	assert.FileExists(t, path)
-	require.NoError(t, removePidFile(path, 42))
-
-	_, err := os.Stat(path)
-	require.ErrorIs(t, err, fs.ErrNotExist)
 }

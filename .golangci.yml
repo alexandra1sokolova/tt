@@ -776,16 +776,14 @@ linters:
             - "github.com/tarantool/tt/v3/cli/version"
             - "github.com/tarantool/tt/v3/core"
             - "gopkg.in/yaml.v3"
-        # The process supervisor sits under the commands that run it: it
-        # borrows only the pid-file helpers so that every pid file tt writes
-        # follows one format.
+        # The process supervisor sits under the commands that run it and
+        # depends on none of them.
         dir-internal-supervisor:
           files:
             - "**/internal/supervisor/**"
           allow:
             - $gostd
             - "github.com/stretchr/testify"
-            - "github.com/tarantool/tt/v3/cli/process_utils"
             - "github.com/tarantool/tt/v3/internal/supervisor"
         dir-lib-watchdog:
           files:

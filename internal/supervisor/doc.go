@@ -21,21 +21,30 @@
 //
 // # Pid files
 //
-// Options.PidFile is the supervisor's own pid file. Run creates it after it
-// has subscribed to signals, so whoever finds the pid of the supervisor there
-// can already stop it with a signal. It is created with O_EXCL and refused
-// while it names a live process; a file naming a dead one is replaced. If it
-// cannot be created, Run returns before starting anything and does not run
-// Options.Cleanup: whatever is out there belongs to someone else. Once
-// created, it is removed when Run returns, after the child is gone and
-// Options.Cleanup has run, so its disappearance means the supervision is
-// over.
+// A pid file holds the decimal pid without a newline, the format tt stop and
+// tt status read. Owning one means holding an exclusive flock on it, taken
+// without waiting and kept for as long as the pid in it is current; the lock
+// descriptor is close-on-exec, so no child inherits it, and the kernel drops
+// it when the owner dies, however it dies. A file whose lock is held is
+// refused. A file nobody holds is stale and is taken over in place, under the
+// lock, unless it names a live process: such a file comes from a tt that
+// does not lock pid files, and that process still runs. Of any number of
+// processes racing for one pid file, exactly one owns it. An owner unlinks
+// the file before it unlocks it, and a process that locked a file no longer
+// at the path starts over, so ownership never passes to an unlinked file.
+// Only the file the owner locked is removed, never one that replaced it.
+//
+// Options.PidFile is the supervisor's own pid file. Run takes it after it has
+// subscribed to signals, so whoever finds the pid of the supervisor there can
+// already stop it with a signal. If Run cannot take it, it returns before
+// starting anything and does not run Options.Cleanup: whatever is out there
+// belongs to someone else. Once taken, it is removed when Run returns, after
+// the child is gone and Options.Cleanup has run, so its disappearance means
+// the supervision is over.
 //
 // Options.ChildPidFile is the child's pid file. It is written after every
 // start, before the Started event, and removed after every exit. If it cannot
 // be written, the child is killed and Run returns.
-//
-// A pid file is removed only while it still names the pid written into it.
 //
 // # Signals
 //

@@ -38,6 +38,8 @@ type child struct {
 	group bool
 	// done receives the exit of the child exactly once.
 	done chan Exit
+	// pidFile is the child's pid file while the engine owns one.
+	pidFile *pidFile
 }
 
 // command prepares the command for spec.
@@ -75,10 +77,11 @@ func startChild(ctx context.Context, spec *Spec, start StartFunc) (*child, error
 	}
 
 	proc := &child{
-		cmd:   cmd,
-		pid:   cmd.Process.Pid,
-		group: spec.ProcessGroup,
-		done:  make(chan Exit, 1),
+		cmd:     cmd,
+		pid:     cmd.Process.Pid,
+		group:   spec.ProcessGroup,
+		done:    make(chan Exit, 1),
+		pidFile: nil,
 	}
 
 	go func() {

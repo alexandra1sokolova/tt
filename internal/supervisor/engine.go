@@ -202,10 +202,14 @@ func (e *Engine) Run(ctx context.Context) error {
 	signals, unsubscribe := e.subscribe()
 	defer unsubscribe()
 
-	pid := os.Getpid()
+	var owned *pidFile
 
 	if e.opts.PidFile != "" {
-		err := createPidFile(e.opts.PidFile, pid)
+		var err error
+
+		pid := os.Getpid()
+
+		owned, err = acquirePidFile(e.opts.PidFile, pid)
 		if err != nil {
 			return &Error{Op: OpPidFile, Err: err}
 		}
@@ -219,8 +223,8 @@ func (e *Engine) Run(ctx context.Context) error {
 		e.opts.Cleanup()
 	}
 
-	if e.opts.PidFile != "" {
-		rmErr := removePidFile(e.opts.PidFile, pid)
+	if owned != nil {
+		rmErr := owned.release()
 		if rmErr != nil {
 			err = errors.Join(err, &Error{Op: OpPidFile, Err: rmErr})
 		}
@@ -249,7 +253,7 @@ func (e *Engine) loop(ctx context.Context, signals <-chan os.Signal) error {
 
 		result := e.supervise(ctx, signals, proc, &spec)
 
-		err = e.removeChildPidFile(proc.pid)
+		err = e.releaseChildPidFile(proc)
 		e.emit(result.exit)
 
 		switch {
@@ -282,7 +286,7 @@ func (e *Engine) launch(ctx context.Context, spec *Spec) (*child, error) {
 	}
 
 	if e.opts.ChildPidFile != "" {
-		err = createPidFile(e.opts.ChildPidFile, proc.pid)
+		proc.pidFile, err = acquirePidFile(e.opts.ChildPidFile, proc.pid)
 		if err != nil {
 			e.emit(Killed{
 				Pid:    proc.pid,
@@ -302,12 +306,16 @@ func (e *Engine) launch(ctx context.Context, spec *Spec) (*child, error) {
 	return proc, nil
 }
 
-func (e *Engine) removeChildPidFile(pid int) error {
-	if e.opts.ChildPidFile == "" {
+// releaseChildPidFile removes the pid file of an exited child.
+func (e *Engine) releaseChildPidFile(proc *child) error {
+	if proc.pidFile == nil {
 		return nil
 	}
 
-	err := removePidFile(e.opts.ChildPidFile, pid)
+	err := proc.pidFile.release()
+
+	proc.pidFile = nil
+
 	if err != nil {
 		return &Error{Op: OpChildPidFile, Err: err}
 	}
