@@ -334,6 +334,8 @@ for machine-readable output.
 - A second `tt tcm start --watchdog` in a directory where one runs is refused
   before it starts anything. Before, it started a second TCM and stopped it
   again once it found the pid file taken.
+- `tt tcm start` without `--watchdog`, refused because `tcm.pid` names a
+  running TCM, no longer leaves the TCM it started running.
 - `tt stop` sent while the watchdog waits to restart a failed instance stops
   the watchdog. Before, the signal was lost: the instance was restarted, and
   `tt stop` gave up after 30 seconds.

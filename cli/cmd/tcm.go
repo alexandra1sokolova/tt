@@ -150,6 +150,11 @@ func startTcmInteractive(logLevel string) error {
 
 	owned, err := process_utils.CreatePIDFile(tcmPidFile, tcmApp.Process.Pid)
 	if err != nil {
+		// The pid file belongs to a TCM already running: the one just
+		// started would run with no pid file to stop it by.
+		_ = tcmApp.Process.Kill()
+		_ = tcmApp.Wait()
+
 		return err
 	}
 
