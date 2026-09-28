@@ -16,10 +16,13 @@
 // file. A file is removed only by its owner, or under the lock by RemoveFor,
 // and only while the path still names the file that was locked.
 //
-// The ownership is exclusive among the processes that follow this protocol.
-// A writer or remover of the same path that does not, one that removes a
-// file it has found stale without locking it, or removes the path
-// unconditionally, can unlink the file of a new owner and break it.
+// The ownership is exclusive among the processes that follow this protocol,
+// and every writer and remover of a tt pid file does: the watchdogs of
+// instances and of TCM, tt start --interactive, the tt daemon, tt tcm start
+// without a watchdog, and tt kill. A process outside tt that writes or
+// removes the same path, removes a file it has found stale without locking
+// it, or removes the path unconditionally, is outside it and can unlink the
+// file of a new owner and break it.
 package pidfile
 
 import (
