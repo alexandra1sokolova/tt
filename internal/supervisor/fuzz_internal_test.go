@@ -316,9 +316,31 @@ type fuzzRun struct {
 	rivalOwned    bool
 	result        error
 	panicValue    any
+	// The effects, recorded where they happen rather than from the events:
+	// the signals sent to children since the last event, the calls of
+	// OnReload since the last event, and the results the checks returned.
+	sends        []fuzzSend
+	reloads      int
+	checkResults []fuzzCheckResult
+	// ctxStopped tells that the stop of a cancelled context, which the
+	// engine sends without an event, has been accounted for.
+	ctxCancelled bool
+	ctxStopped   bool
 
 	violationsMu sync.Mutex
 	violations   []string
+}
+
+// fuzzSend is a signal the engine sent to a child.
+type fuzzSend struct {
+	pid int
+	sig syscall.Signal
+}
+
+// fuzzCheckResult is what a check returned, and whether an event reported it.
+type fuzzCheckResult struct {
+	err      error
+	reported bool
 }
 
 // locked runs change under mu.
@@ -399,6 +421,8 @@ func (run *fuzzRun) deliver(proc *fakeProc, sig syscall.Signal) error {
 	run.mu.Lock()
 	defer run.mu.Unlock()
 
+	run.sends = append(run.sends, fuzzSend{pid: proc.pid, sig: sig})
+
 	if proc.exited {
 		return fmt.Errorf("signalling %d: %w", proc.pid, os.ErrProcessDone)
 	}
@@ -437,12 +461,14 @@ func (run *fuzzRun) check(ctx context.Context) error {
 		}
 	}
 
-	if errors.Is(err, errFuzzCheck) {
-		run.locked(func() {
+	run.locked(func() {
+		run.checkResults = append(run.checkResults, fuzzCheckResult{err: err, reported: false})
+
+		if errors.Is(err, errFuzzCheck) {
 			run.failed[owner] = true
 			run.checkFailed = true
-		})
-	}
+		}
+	})
 
 	return err
 }
@@ -514,16 +540,20 @@ func (run *fuzzRun) onEvent(event Event) {
 	case PidFileWritten:
 		kind = hookCount
 
+		run.expectEffects(event, nil, 0)
+
 		if event.Path == run.pidFile {
 			run.ownedByEngine = true
 		}
 	case Started:
 		kind = hookStarted
 
+		run.expectEffects(event, nil, 0)
 		run.onStarted(event)
 	case Exit:
 		kind = hookExit
 
+		run.expectEffects(event, nil, 0)
 		run.onExit(event)
 	case SignalReceived:
 		kind = hookSignal
@@ -532,19 +562,20 @@ func (run *fuzzRun) onEvent(event Event) {
 	case Checked:
 		kind = hookChecked
 
-		switch {
-		case event.Err == nil:
-		case !errors.Is(event.Err, errFuzzCheck):
-			run.failf("a check reported %v", event.Err)
-		case run.running == 0:
-			run.failf("a failed check reported with no child")
-		default:
-			run.reported[run.running] = true
-		}
+		run.expectEffects(event, nil, 0)
+		run.onChecked(event)
 	case Killed:
 		kind = hookKilled
+
+		run.expectEffects(event, []fuzzSend{{pid: event.Pid, sig: syscall.SIGKILL}}, 0)
+
+		if event.Pid != run.running {
+			run.failf("%d killed while %d is the child", event.Pid, run.running)
+		}
 	case Restarting:
 		kind = hookRestarting
+
+		run.expectEffects(event, nil, 0)
 	}
 
 	run.mu.Unlock()
@@ -581,11 +612,14 @@ func (run *fuzzRun) onExit(event Exit) {
 		run.failf("the child pid file outlived %d", event.Pid)
 	}
 
-	// Every failure of a check of this child has been reported by now.
+	// Every failure of a check of this child has been reported by now. A
+	// pass or a bare cancellation that came as it exited is not reported.
 	if run.failed[event.Pid] != run.reported[event.Pid] {
 		run.failf("the check of %d failed: %v, reported: %v", event.Pid,
 			run.failed[event.Pid], run.reported[event.Pid])
 	}
+
+	run.checkResults = nil
 }
 
 func (run *fuzzRun) onSignal(event SignalReceived) {
@@ -609,6 +643,95 @@ func (run *fuzzRun) onSignal(event SignalReceived) {
 
 	if event.Err != nil && !errors.Is(event.Err, os.ErrProcessDone) {
 		run.failf("%s handled with %v", sig, event.Err)
+	}
+
+	// What the action has to have done, whatever the event says.
+	var (
+		sends   []fuzzSend
+		reloads int
+	)
+
+	switch want {
+	case ActionStop:
+		if run.running != 0 {
+			out := syscall.SIGTERM
+			if run.cfg.forwardStop {
+				out = sig
+			}
+
+			sends = []fuzzSend{{pid: run.running, sig: out}}
+		}
+	case ActionReload:
+		reloads = 1
+
+		if run.running != 0 {
+			sends = []fuzzSend{{pid: run.running, sig: sig}}
+		}
+	case ActionForward:
+		sends = []fuzzSend{{pid: run.running, sig: sig}}
+	case ActionDrop, ActionIgnore:
+	}
+
+	run.expectEffects(event, sends, reloads)
+}
+
+// expectEffects checks that since the previous event the engine sent the
+// children exactly sends and called OnReload reloads times, and starts
+// counting afresh. The stop that a cancelled context sends the child comes
+// with no event; it is taken once, from the front.
+func (run *fuzzRun) expectEffects(event Event, sends []fuzzSend, reloads int) {
+	got := run.sends
+	ctxStop := fuzzSend{pid: run.running, sig: syscall.SIGTERM}
+
+	// The stop of the context is told apart from the sends the event
+	// accounts for only when the sends do not match without it.
+	if !slices.Equal(got, sends) && run.ctxCancelled && !run.ctxStopped &&
+		run.running != 0 && len(got) > 0 && got[0] == ctxStop {
+		got = got[1:]
+		run.ctxStopped = true
+	}
+
+	if !slices.Equal(got, sends) {
+		run.failf("at %T %+v the engine had sent %v, want %v", event, event, got, sends)
+	}
+
+	if run.reloads != reloads {
+		run.failf("at %T %+v OnReload had run %d times, want %d", event, event,
+			run.reloads, reloads)
+	}
+
+	run.sends, run.reloads = nil, 0
+}
+
+// onChecked checks a Checked event against the results the checks returned:
+// it reports the oldest one not yet reported, as it was.
+func (run *fuzzRun) onChecked(event Checked) {
+	index := slices.IndexFunc(run.checkResults, func(result fuzzCheckResult) bool {
+		return !result.reported
+	})
+	if index < 0 {
+		run.failf("Checked %v with no check that returned", event.Err)
+
+		return
+	}
+
+	result := &run.checkResults[index]
+
+	result.reported = true
+
+	if (result.err == nil) != (event.Err == nil) ||
+		(result.err != nil && !errors.Is(event.Err, result.err)) {
+		run.failf("Checked %v for a check that returned %v", event.Err, result.err)
+	}
+
+	switch {
+	case event.Err == nil:
+	case !errors.Is(event.Err, errFuzzCheck):
+		run.failf("a check reported %v", event.Err)
+	case run.running == 0:
+		run.failf("a failed check reported with no child")
+	default:
+		run.reported[run.running] = true
 	}
 }
 
@@ -754,7 +877,10 @@ func (run *fuzzRun) apply(step fuzzStep) {
 		default:
 		}
 	case opCancel:
-		run.locked(func() { run.stopRequested = true })
+		run.locked(func() {
+			run.stopRequested = true
+			run.ctxCancelled = true
+		})
 		run.cancel()
 	case opFailNext:
 		run.locked(func() { run.failNext++ })
@@ -798,16 +924,24 @@ func engineStacks() []string {
 
 // quiet tells whether every goroutine of the engine waits in a select. As
 // every channel it waits on is made ready by the script alone, the engine
-// then cannot move until the script does.
+// then cannot move until the script does. It is called only while Run is
+// active, so it also requires that the goroutine running Run is among those
+// it recognises: were the stacks to change shape so that it recognised none,
+// the engine would never look quiet, rather than always.
 func quiet() bool {
-	for _, stack := range engineStacks() {
+	stacks := engineStacks()
+	runner := false
+
+	for _, stack := range stacks {
 		header, _, _ := strings.Cut(stack, "\n")
 		if !strings.Contains(header, "[select") {
 			return false
 		}
+
+		runner = runner || strings.Contains(stack, "supervisor.(*fuzzRun).drive.func")
 	}
 
-	return true
+	return runner
 }
 
 func (run *fuzzRun) isFinished() bool {
@@ -829,7 +963,8 @@ func (run *fuzzRun) settle() {
 		}
 
 		if time.Now().After(deadline) {
-			run.t.Fatalf("the engine did not settle\nscript %s\n%s", run.describe(),
+			run.t.Fatalf("the engine did not settle, or its goroutines are not "+
+				"recognised any more\nscript %s\n%s", run.describe(),
 				strings.Join(engineStacks(), "\n\n"))
 		}
 
@@ -892,6 +1027,7 @@ func (run *fuzzRun) drive() {
 		IgnoreSignals: []syscall.Signal{fuzzIgnored},
 		ReloadSignal:  fuzzReload,
 		OnReload: func() error {
+			run.locked(func() { run.reloads++ })
 			run.hook(hookReload)
 
 			return nil
@@ -1108,6 +1244,13 @@ func (run *fuzzRun) checkEnd() {
 
 	if run.running != 0 {
 		run.failf("Run returned without reporting the exit of %d", run.running)
+	}
+
+	// Every signal sent went with an event, bar the stop of a cancelled
+	// context, which the Exit took.
+	if len(run.sends) > 0 || run.reloads > 0 {
+		run.failf("Run returned after sending %v and reloading %d times with no event",
+			run.sends, run.reloads)
 	}
 
 	run.checkResult(0)
