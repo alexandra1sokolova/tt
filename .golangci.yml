@@ -508,6 +508,7 @@ linters:
             - "github.com/tarantool/tt/v3/cli/daemon"
             - "github.com/tarantool/tt/v3/cli/process_utils"
             - "github.com/tarantool/tt/v3/cli/ttlog"
+            - "github.com/tarantool/tt/v3/internal/pidfile"
         dir-cli-docker:
           files:
             - "**/cli/docker/**"
@@ -606,6 +607,7 @@ linters:
             - "github.com/fatih/color"
             - "github.com/stretchr/testify"
             - "github.com/tarantool/tt/v3/cli/process_utils"
+            - "github.com/tarantool/tt/v3/internal/pidfile"
         dir-cli-replicaset:
           files:
             - "**/cli/replicaset/**"
@@ -654,6 +656,7 @@ linters:
             - "github.com/tarantool/tt/v3/cli/running"
             - "github.com/tarantool/tt/v3/cli/ttlog"
             - "github.com/tarantool/tt/v3/cli/util"
+            - "github.com/tarantool/tt/v3/internal/pidfile"
         dir-cli-search:
           files:
             - "**/cli/search/**"

@@ -262,57 +262,13 @@ func TestKeep(t *testing.T) {
 
 	_, err = Acquire(path, os.Getpid())
 	require.ErrorIs(t, err, ErrBusy, "the process the file names still runs")
-	require.ErrorIs(t, Check(path), ErrBusy)
 
 	require.NoError(t, cmd.Process.Kill())
 	require.Error(t, cmd.Wait())
-	require.NoError(t, Check(path))
 
 	again, err := Acquire(path, os.Getpid())
 	require.NoError(t, err)
 	require.NoError(t, again.Release())
-}
-
-// TestCheck pins that Check tells a live pid from a missing, empty, garbage
-// or stale file, and changes none of them.
-func TestCheck(t *testing.T) {
-	dir := t.TempDir()
-	cmd := sleeper(t)
-
-	cases := map[string]struct {
-		content *string
-		busy    bool
-	}{
-		"missing": {content: nil, busy: false},
-		"empty":   {content: new(""), busy: false},
-		"garbage": {content: new("pid"), busy: false},
-		"stale":   {content: new(strconv.Itoa(deadPid(t))), busy: false},
-		"live":    {content: new(strconv.Itoa(cmd.Process.Pid)), busy: true},
-	}
-
-	for name, test := range cases {
-		path := filepath.Join(dir, name+".pid")
-		if test.content != nil {
-			require.NoError(t, os.WriteFile(path, []byte(*test.content), 0o600))
-		}
-
-		err := Check(path)
-		if test.busy {
-			require.ErrorIs(t, err, ErrBusy, name)
-		} else {
-			require.NoError(t, err, name)
-		}
-
-		if test.content == nil {
-			assert.NoFileExists(t, path, name)
-
-			continue
-		}
-
-		data, err := os.ReadFile(path)
-		require.NoError(t, err)
-		assert.Equal(t, *test.content, string(data), name)
-	}
 }
 
 // TestRemoveFor pins the verified remove: it removes the file of a process

@@ -227,28 +227,6 @@ func (owned *File) Keep() error {
 	return closeFile(owned.file)
 }
 
-// Check reports, with an error wrapping ErrBusy, a pid file that names a live
-// process. A missing, empty or stale file is no error. It reads the file and
-// changes nothing, so it cannot disturb an owner; it is a courtesy check
-// before starting something that will Acquire the file itself.
-func Check(path string) error {
-	data, err := os.ReadFile(path)
-
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil
-	case err != nil:
-		return fmt.Errorf("reading the pid file: %w", err)
-	}
-
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err == nil && alive(pid) {
-		return fmt.Errorf("%w %d: %s", ErrBusy, pid, path)
-	}
-
-	return nil
-}
-
 // RemoveFor removes the pid file at path if it still names pid, taking the
 // lock first. It is for the pid file of a process that is gone, killed or
 // not, whose lock the kernel drops once the process has exited: it retries
