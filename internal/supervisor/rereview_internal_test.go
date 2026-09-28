@@ -205,6 +205,50 @@ func TestCheckPanics(t *testing.T) {
 	}
 }
 
+// TestSpecCommand pins how a Spec runs without a supervisor: cancelling the
+// context sends the stop signal, and a process that ignores it is killed a
+// stop timeout later.
+func TestSpecCommand(t *testing.T) {
+	cases := []struct {
+		name   string
+		mode   string
+		code   int
+		signal syscall.Signal
+	}{
+		{name: "stops", mode: modeServe, code: exitOnInt},
+		{name: "killed", mode: modeStubborn, code: -1, signal: syscall.SIGKILL},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			spec := helperSpec(t, dir, test.mode)
+
+			spec.StopSignal = syscall.SIGINT
+			spec.StopTimeout = 300 * time.Millisecond
+
+			ctx, cancel := context.WithCancel(t.Context())
+			cmd := spec.Command(ctx)
+
+			require.NoError(t, cmd.Start())
+			waitReady(t, dir, cmd.Process.Pid)
+
+			cancelled := time.Now()
+
+			cancel()
+
+			err := cmd.Wait()
+			require.Error(t, err)
+			assert.Equal(t, test.code, cmd.ProcessState.ExitCode())
+			assert.Equal(t, test.signal, termSignal(cmd.ProcessState))
+
+			if test.signal == syscall.SIGKILL {
+				assert.GreaterOrEqual(t, time.Since(cancelled), spec.StopTimeout)
+			}
+		})
+	}
+}
+
 // emptyJoinError is an error joining nothing.
 type emptyJoinError struct{}
 

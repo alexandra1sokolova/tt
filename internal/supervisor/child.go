@@ -39,10 +39,18 @@ type child struct {
 	send func(sig syscall.Signal) error
 }
 
-// command prepares the command for spec.
+// command prepares the command the engine runs for spec.
 func command(ctx context.Context, spec *Spec) *exec.Cmd {
 	// The engine stops the child itself; the context must not kill it.
-	cmd := exec.CommandContext(context.WithoutCancel(ctx), spec.Path, spec.Args...)
+	return spec.Command(context.WithoutCancel(ctx))
+}
+
+// Command prepares a command that runs the Spec once, for a caller that runs
+// it without a supervisor. Cancelling ctx sends the process Spec.StopSignal;
+// Spec.StopTimeout later the process is killed. The output of the process is
+// drained for at most Spec.StopTimeout after it has exited.
+func (spec *Spec) Command(ctx context.Context) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
 
 	cmd.Env = spec.Env
 	cmd.Dir = spec.Dir
@@ -55,6 +63,9 @@ func command(ctx context.Context, spec *Spec) *exec.Cmd {
 	cmd.Stderr = spec.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: spec.ProcessGroup}
 	cmd.WaitDelay = spec.StopTimeout
+	cmd.Cancel = func() error {
+		return cmd.Process.Signal(spec.StopSignal)
+	}
 
 	return cmd
 }
