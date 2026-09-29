@@ -83,7 +83,9 @@ type watchdogTest struct {
 // testRestartDelay is the restart delay of the watchdog of a test.
 const testRestartDelay = 100 * time.Millisecond
 
-func newWatchdogTest(t *testing.T, restartable bool, cmdCtx *cmdcontext.CmdCtx) *watchdogTest {
+func newWatchdogTest(t *testing.T, restartable bool, cmdCtx *cmdcontext.CmdCtx,
+	configure ...func(opts *supervisor.Options),
+) *watchdogTest {
 	t.Helper()
 
 	appPath, err := filepath.Abs(filepath.Join(instTestAppDir, "dumb_test_app.lua"))
@@ -146,6 +148,10 @@ func newWatchdogTest(t *testing.T, restartable bool, cmdCtx *cmdcontext.CmdCtx) 
 		}
 
 		onEvent(event)
+	}
+
+	for _, change := range configure {
+		change(&opts)
 	}
 
 	test.engine, err = supervisor.New(test.src, opts)
@@ -409,6 +415,52 @@ func TestWatchdogCleanupAfterRunDirChange(t *testing.T) {
 			assertNoSockets(t, &moved)
 		})
 	}
+}
+
+// TestWatchdogCleanupAfterFailedStart pins that the sockets removed at the
+// end are those of the tarantool that ran, when the context of the next
+// start is ready but that start fails: the paths of the context that never
+// ran, where something else may live, are left alone.
+func TestWatchdogCleanupAfterFailedStart(t *testing.T) {
+	errStart := errors.New("the start failed")
+	starts := 0
+
+	test := newWatchdogTest(t, true, &cmdcontext.CmdCtx{}, func(opts *supervisor.Options) {
+		opts.Start = func(cmd *exec.Cmd) error {
+			starts++
+			if starts > 1 {
+				return errStart
+			}
+
+			return supervisor.StartCmd(cmd)
+		}
+	})
+	done := test.run()
+
+	first := test.waitStarted(1)
+	old := test.inst
+
+	waitSockets(t, &old)
+
+	moved := test.moveRunDir()
+
+	for _, path := range []string{moved.ConsoleSocket, moved.BinaryPort} {
+		require.NoError(t, os.WriteFile(path, nil, 0o600))
+	}
+
+	// Killed, tarantool leaves its sockets behind.
+	require.NoError(t, syscall.Kill(first, syscall.SIGKILL))
+
+	err := waitDone(t, done)
+	require.ErrorIs(t, err, errStart)
+
+	var runErr *supervisor.Error
+
+	require.ErrorAs(t, err, &runErr)
+	assert.Equal(t, supervisor.OpStart, runErr.Op)
+	assertNoSockets(t, &old)
+	assert.FileExists(t, moved.ConsoleSocket)
+	assert.FileExists(t, moved.BinaryPort)
 }
 
 // TestWatchdogForwardsStopSignal pins that a stop signal reaches tarantool
