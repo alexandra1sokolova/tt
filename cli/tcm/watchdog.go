@@ -163,9 +163,11 @@ func logExit(exit supervisor.Exit) {
 
 // RunWatchdog runs TCM and keeps it running until the watchdog receives
 // SIGINT, SIGTERM, SIGHUP or SIGQUIT, which stop TCM with SIGTERM, or a
-// periodic check fails. It writes both pid files before TCM starts, refuses to
-// run while either names a running process, and removes both before it
-// returns.
+// periodic check fails. It takes its own pid file before it starts TCM and
+// refuses to run while that file names a running process. It takes the pid
+// file of TCM right after every start; when that file names a running
+// process, it kills and waits for the TCM it started and returns. It removes
+// both pid files before it returns.
 func RunWatchdog(opts WatchdogOpts) error {
 	engineOpts := supervisor.Options{
 		PidFile:       opts.PidFile,
