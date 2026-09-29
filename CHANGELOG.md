@@ -202,6 +202,10 @@ for machine-readable output.
   - With `--integrity-check-period`, the integrity of the environment is
     checked periodically while TCM runs, and a failed check stops TCM for
     good.
+- `tt stop`, `tt quit`, `tt tcm stop` and `tt daemon stop` wait 35 seconds for
+  the process to exit, longer than the 30 seconds a watchdog gives its child
+  before it kills it. Before, they gave up after 30 seconds and reported a
+  failure while the watchdog was completing the stop.
 - tt logs through `log/slog`. The text log keeps its look with two changes:
   a warning is marked `⚠` instead of `•`, and a message is no longer padded
   with trailing spaces. A debug line is marked `·`, the continuation lines of

@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tarantool/tt/sdk/integrity"
 	"github.com/tarantool/tt/v3/cli/cmdcontext"
+	"github.com/tarantool/tt/v3/cli/process_utils"
 	"github.com/tarantool/tt/v3/cli/ttlog"
 	"github.com/tarantool/tt/v3/internal/supervisor"
 )
@@ -451,4 +452,11 @@ func readPidFile(t *testing.T, path string) int {
 	require.NoError(t, err)
 
 	return pid
+}
+
+// TestStopOutwaitsWatchdog pins that tt stop and tt quit wait for the
+// watchdog longer than the watchdog waits for tarantool before it kills it,
+// so that they see the stop complete rather than give up first.
+func TestStopOutwaitsWatchdog(t *testing.T) {
+	assert.Less(t, instanceStopTimeout, process_utils.TerminationTimeout)
 }

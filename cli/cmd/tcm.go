@@ -242,15 +242,21 @@ func internalTcmStatus(cmdCtx *cmdcontext.CmdCtx, args []string) error {
 }
 
 func internalTcmStop(cmdCtx *cmdcontext.CmdCtx, args []string) error {
+	return stopTcm(process_utils.TerminationTimeout)
+}
+
+// stopTcm stops the watchdog of TCM if there is one, and TCM itself
+// otherwise, waiting up to wait for the process to exit.
+func stopTcm(wait time.Duration) error {
 	if isExists, _ := process_utils.ExistsAndRecord(watchdogPidFile); isExists {
-		_, err := process_utils.StopProcess(watchdogPidFile)
+		_, err := process_utils.StopProcessWithin(watchdogPidFile, wait)
 		if err != nil {
 			return err
 		}
 
 		log.Info("Watchdog and TCM stopped")
 	} else {
-		_, err := process_utils.StopProcess(tcmPidFile)
+		_, err := process_utils.StopProcessWithin(tcmPidFile, wait)
 		if err != nil {
 			return err
 		}

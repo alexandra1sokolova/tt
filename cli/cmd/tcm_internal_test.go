@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -18,6 +19,7 @@ import (
 	"github.com/tarantool/tt/sdk/integrity"
 	"github.com/tarantool/tt/v3/cli/cmdcontext"
 	"github.com/tarantool/tt/v3/cli/process_utils"
+	tcmCmd "github.com/tarantool/tt/v3/cli/tcm"
 )
 
 var errTampered = errors.New("a checked file changed")
@@ -104,4 +106,111 @@ func TestTcmWatchdogOpts(t *testing.T) {
 	assert.Equal(t, 42*time.Second, opts.CheckPeriod)
 	require.NotNil(t, opts.Check)
 	require.ErrorIs(t, opts.Check(t.Context()), errTampered)
+}
+
+// Environment of TestHelperTcmWatchdog.
+const (
+	tcmWatchdogHelperEnv = "TT_TCM_STOP_TEST_WATCHDOG"
+	tcmStopTimeoutEnv    = "TT_TCM_STOP_TEST_STOP_TIMEOUT"
+)
+
+// stubbornTcm stands in for TCM that does not stop on SIGTERM.
+const stubbornTcm = "#!/bin/sh\ntrap '' TERM\necho $$ > tcm-shim.pid\n" +
+	"while :; do sleep 0.05; done\n"
+
+// TestHelperTcmWatchdog runs the watchdog of tt tcm start --watchdog for
+// TestTcmStopOutwaitsEscalation, in a process of its own.
+func TestHelperTcmWatchdog(t *testing.T) {
+	if os.Getenv(tcmWatchdogHelperEnv) == "" {
+		t.Skip("runs only as the watchdog of TestTcmStopOutwaitsEscalation")
+	}
+
+	stopTimeout, err := time.ParseDuration(os.Getenv(tcmStopTimeoutEnv))
+	if err != nil {
+		panic(err)
+	}
+
+	opts := tcmWatchdogOpts(&cmdcontext.CmdCtx{}, "./tcm")
+
+	opts.StopTimeout = stopTimeout
+
+	err = tcmCmd.RunWatchdog(opts)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+
+		os.Exit(1)
+	}
+
+	os.Exit(0)
+}
+
+// TestTcmStopOutwaitsEscalation pins that tt tcm stop waits for the watchdog
+// to kill TCM that ignores SIGTERM, reap it and remove the pid files, rather
+// than giving up first. Both timeouts are the real ones scaled down alike.
+func TestTcmStopOutwaitsEscalation(t *testing.T) {
+	const scale = 10
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+	require.NoError(t, os.WriteFile("tcm", []byte(stubbornTcm), 0o700))
+
+	exe, err := os.Executable()
+	require.NoError(t, err)
+
+	watchdog := exec.CommandContext(t.Context(), exe, "-test.run=^TestHelperTcmWatchdog$")
+
+	watchdog.Dir = dir
+
+	watchdog.Env = append(os.Environ(), tcmWatchdogHelperEnv+"=1",
+		tcmStopTimeoutEnv+"="+(watchdogStopTimeout/scale).String())
+
+	output := &strings.Builder{}
+
+	watchdog.Stdout = output
+	watchdog.Stderr = output
+
+	require.NoError(t, watchdog.Start())
+
+	// The watchdog is reaped as soon as it exits, so that the stop sees it
+	// gone.
+	exited := make(chan struct{})
+
+	go func() {
+		_ = watchdog.Wait()
+
+		close(exited)
+	}()
+
+	t.Cleanup(func() {
+		_ = watchdog.Process.Kill()
+
+		<-exited
+	})
+
+	require.Eventually(t, func() bool {
+		_, wdErr := os.Stat(watchdogPidFile)
+		_, tcmErr := os.Stat(tcmPidFile)
+		_, shimErr := os.Stat("tcm-shim.pid")
+
+		return wdErr == nil && tcmErr == nil && shimErr == nil
+	}, 10*time.Second, 10*time.Millisecond, "the watchdog did not start TCM")
+
+	data, err := os.ReadFile("tcm-shim.pid")
+	require.NoError(t, err)
+
+	shim, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = syscall.Kill(-shim, syscall.SIGKILL) })
+
+	started := time.Now()
+
+	require.NoError(t, stopTcm(process_utils.TerminationTimeout/scale))
+	assert.GreaterOrEqual(t, time.Since(started), watchdogStopTimeout/scale,
+		"TCM stopped before the escalation")
+
+	<-exited
+	assert.Zero(t, watchdog.ProcessState.ExitCode())
+	assert.NoFileExists(t, watchdogPidFile)
+	assert.NoFileExists(t, tcmPidFile)
+	assert.ErrorIs(t, syscall.Kill(shim, 0), syscall.ESRCH, "TCM outlived the stop")
 }
