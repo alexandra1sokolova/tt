@@ -108,6 +108,73 @@ func TestTcmWatchdogOpts(t *testing.T) {
 	require.ErrorIs(t, opts.Check(t.Context()), errTampered)
 }
 
+// TestTcmStatus pins where tt tcm status finds TCM: through a running
+// watchdog first, also while it has no TCM running, then through tcm.pid.
+func TestTcmStatus(t *testing.T) {
+	live := exec.CommandContext(t.Context(), "sleep", "60")
+	require.NoError(t, live.Start())
+	t.Cleanup(func() {
+		_ = live.Process.Kill()
+		_ = live.Wait()
+	})
+
+	other := exec.CommandContext(t.Context(), "sleep", "60")
+	require.NoError(t, other.Start())
+	t.Cleanup(func() {
+		_ = other.Process.Kill()
+		_ = other.Wait()
+	})
+
+	gone := exec.CommandContext(t.Context(), "true")
+	require.NoError(t, gone.Run())
+
+	cases := []struct {
+		name     string
+		watchdog int
+		tcm      int
+		code     int
+		pid      int
+	}{
+		{name: "no pid files", code: process_utils.ProcessStoppedCode},
+		{
+			name: "watchdog and TCM", watchdog: live.Process.Pid, tcm: other.Process.Pid,
+			code: process_utils.ProcessRunningCode, pid: other.Process.Pid,
+		},
+		{
+			name: "watchdog waiting to restart", watchdog: live.Process.Pid,
+			code: process_utils.ProcessRunningCode, pid: live.Process.Pid,
+		},
+		{
+			name: "interactive TCM", tcm: other.Process.Pid,
+			code: process_utils.ProcessRunningCode, pid: other.Process.Pid,
+		},
+		{
+			name: "dead watchdog, interactive TCM", watchdog: gone.Process.Pid,
+			tcm: other.Process.Pid, code: process_utils.ProcessRunningCode, pid: other.Process.Pid,
+		},
+		{name: "dead TCM", tcm: gone.Process.Pid, code: process_utils.ProcessDeadCode},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+
+			files := map[string]int{watchdogPidFile: test.watchdog, tcmPidFile: test.tcm}
+
+			for path, pid := range files {
+				if pid != 0 {
+					require.NoError(t, os.WriteFile(path, []byte(strconv.Itoa(pid)), 0o600))
+				}
+			}
+
+			status := tcmStatus()
+			assert.Equal(t, test.code, status.Code, status.Status)
+			assert.Equal(t, test.pid, status.PID)
+			require.NoError(t, internalTcmStatus(&cmdcontext.CmdCtx{}, nil))
+		})
+	}
+}
+
 // Environment of TestHelperTcmWatchdog.
 const (
 	tcmWatchdogHelperEnv = "TT_TCM_STOP_TEST_WATCHDOG"

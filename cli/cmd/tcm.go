@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/fatih/color"
@@ -207,17 +207,25 @@ func internalStartTcm(cmdCtx *cmdcontext.CmdCtx, args []string) error {
 	return tcmCmd.RunWatchdog(tcmWatchdogOpts(cmdCtx, tcmCtx.Executable))
 }
 
+// tcmStatus tells the state of TCM the way tt tcm stop finds it: through a
+// running watchdog first, which runs TCM or waits to restart it, and through
+// the pid file of TCM started without a watchdog otherwise. The PID is the
+// one of TCM, or of the watchdog while it has no TCM running.
+func tcmStatus() process_utils.ProcessState {
+	watchdog := process_utils.ProcessStatus(watchdogPidFile)
+	if watchdog.Code != process_utils.ProcessRunningCode {
+		return process_utils.ProcessStatus(tcmPidFile)
+	}
+
+	tcm := process_utils.ProcessStatus(tcmPidFile)
+	if tcm.Code == process_utils.ProcessRunningCode {
+		return tcm
+	}
+
+	return watchdog
+}
+
 func internalTcmStatus(cmdCtx *cmdcontext.CmdCtx, args []string) error {
-	pidAbsPath, err := filepath.Abs(tcmPidFile)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path of %q: %w", tcmPidFile, err)
-	}
-
-	_, err = os.Stat(pidAbsPath)
-	if err != nil {
-		return fmt.Errorf("path does not exist: %w", err)
-	}
-
 	statusTable := table.NewWriter()
 	statusTable.SetOutputMirror(os.Stdout)
 
@@ -231,10 +239,15 @@ func internalTcmStatus(cmdCtx *cmdcontext.CmdCtx, args []string) error {
 		{Number: statusStateColumn, Align: text.AlignLeft, AlignHeader: text.AlignLeft},
 	})
 
-	status := process_utils.ProcessStatus(pidAbsPath)
+	status := tcmStatus()
+
+	pid := ""
+	if status.PID != 0 {
+		pid = strconv.Itoa(status.PID)
+	}
 
 	statusTable.AppendRows([]table.Row{
-		{"TCM", status.Status, status.PID},
+		{"TCM", status.Status, pid},
 	})
 	statusTable.Render()
 

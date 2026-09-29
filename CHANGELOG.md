@@ -196,12 +196,15 @@ for machine-readable output.
     a limit.
   - SIGHUP and SIGQUIT sent to the watchdog stop TCM as SIGINT and SIGTERM
     do. Before, they killed the watchdog and left TCM running without it.
-  - The watchdog removes `watchdog.pid` and `tcm.pid` when it exits, so
-    `tt tcm status` after a stop reports the missing pid file rather than a
-    dead TCM.
+  - The watchdog removes `watchdog.pid` and `tcm.pid` when it exits.
   - With `--integrity-check-period`, the integrity of the environment is
     checked periodically while TCM runs, and a failed check stops TCM for
     good.
+- `tt tcm status` finds TCM the way `tt tcm stop` does: through
+  `watchdog.pid` first, and reports TCM as `RUNNING` while the watchdog runs,
+  also while it waits to restart TCM; through `tcm.pid` otherwise. With
+  neither file it reports `NOT RUNNING` and exits with 0. Before, it read
+  `tcm.pid` only, and failed with `path does not exist` without it.
 - `tt stop`, `tt quit`, `tt tcm stop` and `tt daemon stop` wait 35 seconds for
   the process to exit, longer than the 30 seconds a watchdog gives its child
   before it kills it. Before, they gave up after 30 seconds and reported a
