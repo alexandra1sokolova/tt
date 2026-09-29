@@ -199,7 +199,8 @@ for machine-readable output.
   - The watchdog removes `watchdog.pid` and `tcm.pid` when it exits.
   - With `--integrity-check-period`, the integrity of the environment is
     checked periodically while TCM runs, and a failed check stops TCM for
-    good.
+    good. With `--integrity-check` and no period, the period is one day, as
+    for `tt start`.
 - `tt tcm status` finds TCM the way `tt tcm stop` does: through
   `watchdog.pid` first, and reports TCM as `RUNNING` while the watchdog runs,
   also while it waits to restart TCM; through `tcm.pid` otherwise. With

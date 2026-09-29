@@ -108,6 +108,21 @@ func TestTcmWatchdogOpts(t *testing.T) {
 	require.ErrorIs(t, opts.Check(t.Context()), errTampered)
 }
 
+// TestTcmWatchdogCheckPeriodDefault pins that with integrity checking on and
+// no --integrity-check-period, TCM is checked as often as tt start checks an
+// instance, and not at all with integrity checking off.
+func TestTcmWatchdogCheckPeriodDefault(t *testing.T) {
+	cmdCtx := &cmdcontext.CmdCtx{}
+
+	assert.Zero(t, tcmWatchdogOpts(cmdCtx, "/opt/tcm").CheckPeriod)
+
+	cmdCtx.Cli.IntegrityCheck = "public.pem"
+
+	assert.Equal(t, time.Duration(integrityCheckPeriod)*time.Second,
+		tcmWatchdogOpts(cmdCtx, "/opt/tcm").CheckPeriod)
+	assert.Equal(t, 24*time.Hour, time.Duration(integrityCheckPeriod)*time.Second)
+}
+
 // TestTcmStatus pins where tt tcm status finds TCM: through a running
 // watchdog first, also while it has no TCM running, then through tcm.pid.
 func TestTcmStatus(t *testing.T) {

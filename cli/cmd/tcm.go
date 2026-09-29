@@ -172,7 +172,8 @@ func startTcmInteractive(logLevel string) error {
 
 // tcmWatchdogOpts are the options of the watchdog of TCM: the pid files in
 // the working directory, and the periodic integrity check of the global
-// --integrity-check-period.
+// --integrity-check-period, with the default period of tt start when
+// integrity checking is on and no period is given.
 func tcmWatchdogOpts(cmdCtx *cmdcontext.CmdCtx, executable string) tcmCmd.WatchdogOpts {
 	repository := cmdCtx.Integrity.Repository
 
@@ -182,7 +183,7 @@ func tcmWatchdogOpts(cmdCtx *cmdcontext.CmdCtx, executable string) tcmCmd.Watchd
 		ChildPidFile: tcmPidFile,
 		RestartDelay: watchdogRestartDelay,
 		StopTimeout:  watchdogStopTimeout,
-		CheckPeriod:  time.Duration(cmdCtx.Cli.IntegrityCheckPeriod) * time.Second,
+		CheckPeriod:  time.Duration(integrityCheckPeriodOf(&cmdCtx.Cli)) * time.Second,
 		Check: func(context.Context) error {
 			return repository.ValidateAll()
 		},
